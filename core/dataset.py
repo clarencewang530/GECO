@@ -30,7 +30,7 @@ class ObjaverseDataset(Dataset):
         # self._warn()
 
         # TODO: load the list of objects for training
-        self.items = ["/mnt/kostas-graid/sw/envs/chenwang/workspace/lrm-zero123/assets/9000-9999/0a9b36d36e904aee8b51e978a7c0acfd"]
+        self.items = ["/scratch/inf0/user/lliu/chenwang/data-1000/0a9b36d36e904aee8b51e978a7c0acfd"]
         # with open('TODO: file containing the list', 'r') as f:
         #     for line in f.readlines():
         #         self.items.append(line.strip())
@@ -73,10 +73,7 @@ class ObjaverseDataset(Dataset):
         # else:
         #     # fixed views
         #     vids = np.arange(36, 73, 4).tolist() + np.arange(100).tolist()
-        if self.training:
-            vids = np.arange(1, 10)[:self.opt.num_input_views].tolist() + np.random.permutation(50).tolist()
-        else:
-            vids = np.arange(10, 50).tolist()
+        vids = np.arange(1, 10)[:self.opt.num_input_views].tolist() + np.random.permutation(50).tolist()
 
         cond_path = os.path.join(uid, f'000.png')
         from PIL import Image

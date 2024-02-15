@@ -130,9 +130,8 @@ class Zero123PlusGaussian(nn.Module):
         self.vae = self.pipe.vae.requires_grad_(False).eval()
         self.vae.decoder.requires_grad_(True).train()
 
-        self.unet = self.pipe.unet.train().requires_grad_(True)
+        self.unet = self.pipe.unet.eval().requires_grad_(False)
         self.pipe.scheduler = DDPMScheduler.from_config(self.pipe.scheduler.config)
-        import pdb; pdb.set_trace();
         self.decoder = UNetDecoder(self.vae)
 
         # with torch.no_grad():
@@ -170,9 +169,9 @@ class Zero123PlusGaussian(nn.Module):
         if is_zero123plus:
             latents = unscale_latents(latents)
             latents = latents / self.vae.config.scaling_factor
-            image = self.vae.decode(latents, return_dict=False)[0]
+            # image = self.vae.decode(latents, return_dict=False)[0]
             image = self.decoder(latents)
-            # image = unscale_image(image)
+            image = unscale_image(image)
         else:
             image = self.vae.decode(latents, return_dict=False)[0]
         return image

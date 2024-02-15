@@ -106,8 +106,8 @@ config_defaults['big'] = Options(
     up_attention=(True, True, True, False, False),
     splat_size=128,
     output_size=512, # render & supervise Gaussians at a higher resolution.
-    batch_size=1,
-    num_views=8,
+    batch_size=8,
+    num_views=12,
     gradient_accumulation_steps=1,
     mixed_precision='bf16',
 )
