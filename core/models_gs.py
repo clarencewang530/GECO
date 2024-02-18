@@ -28,6 +28,26 @@ def scale_latents(latents):
     latents = (latents - 0.22) * 0.75
     return latents
 
+def encode_image(image, vae, is_zero123plus=True):
+    if is_zero123plus:
+        image = scale_image(image)
+        image = vae.encode(image).latent_dist.sample() * vae.config.scaling_factor
+        image = scale_latents(image)
+    else:
+        image = vae.encode(image, return_dict=False)[0] * vae.config.scaling_factor
+    return image
+
+def decode_latents(latents, decoder, is_zero123plus=True):
+    if is_zero123plus:
+        latents = unscale_latents(latents)
+        latents = latents / decoder.config.scaling_factor
+        image = decoder.decode(latents, return_dict=False)[0]
+        # image = decoder(latents)
+        image = unscale_image(image)
+    else:
+        image = decoder.decode(latents, return_dict=False)[0]
+    return image
+
 def to_rgb_image(maybe_rgba: Image.Image):
     if maybe_rgba.mode == 'RGB':
         return maybe_rgba
@@ -83,6 +103,23 @@ def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t,
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
     return noise_pred
 
+def get_alpha(scheduler, t, device):
+    alphas_cumprod = scheduler.alphas_cumprod.to(device=device)
+    alpha_t = alphas_cumprod[t] ** 0.5
+    sigma_t = (1 - alphas_cumprod[t]) ** 0.5
+    return alpha_t, sigma_t
+    
+def predict_x0(unet, noisy_latents, text_embeddings, t, 
+        guidance_scale=1.0, cross_attention_kwargs={}, 
+        scheduler=None, lora_v=False, model='sd'):
+    alpha_t, sigma_t = get_alpha(scheduler, t, noisy_latents.device)
+    noise_pred = predict_noise0_diffuser(
+        unet, noisy_latents, text_embeddings, t=t,
+        guidance_scale=guidance_scale, cross_attention_kwargs=cross_attention_kwargs, 
+        scheduler=scheduler, model=model
+    )
+    return (noisy_latents - noise_pred * sigma_t) / alpha_t
+
 # From: https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/models/autoencoders/autoencoder_kl.py#L35
 class UNetDecoder(nn.Module):
     def __init__(self, vae):
@@ -120,7 +157,7 @@ class Zero123PlusGaussian(nn.Module):
 
         # Load zero123plus model
         import sys
-        sys.path.append('./zero123plus')
+        sys.path.append('./pipelines')
         self.pipe = DiffusionPipeline.from_pretrained(
             opt.model_path,
             custom_pipeline=opt.custom_pipeline
@@ -155,45 +192,6 @@ class Zero123PlusGaussian(nn.Module):
         if self.opt.lambda_lpips > 0:
             self.lpips_loss = LPIPS(net='vgg')
             self.lpips_loss.requires_grad_(False)
-    
-    def encode_image(self, image, is_zero123plus=True):
-        if is_zero123plus:
-            image = scale_image(image)
-            image = self.vae.encode(image).latent_dist.sample() * self.vae.config.scaling_factor
-            image = scale_latents(image)
-        else:
-            image = self.vae.encode(image, return_dict=False)[0] * self.vae.config.scaling_factor
-        return image
-
-    def decode_latents(self, latents, is_zero123plus=True):
-        if is_zero123plus:
-            latents = unscale_latents(latents)
-            latents = latents / self.vae.config.scaling_factor
-            # image = self.vae.decode(latents, return_dict=False)[0]
-            image = self.decoder(latents)
-            image = unscale_image(image)
-        else:
-            image = self.vae.decode(latents, return_dict=False)[0]
-        return image
-
-    def get_alpha(self, scheduler, t, device):
-        alphas_cumprod = scheduler.alphas_cumprod.to(
-            device=device
-        )
-        alpha_t = alphas_cumprod[t] ** 0.5
-        sigma_t = (1 - alphas_cumprod[t]) ** 0.5
-        return alpha_t, sigma_t
-    
-    def predict_x0(self, noisy_latents, text_embeddings, t, 
-            guidance_scale=1.0, cross_attention_kwargs={}, 
-            scheduler=None, lora_v=False, model='sd'):
-        alpha_t, sigma_t = self.get_alpha(scheduler, t, noisy_latents.device)
-        noise_pred = predict_noise0_diffuser(
-            self.unet, noisy_latents, text_embeddings, t=t,
-            guidance_scale=guidance_scale, cross_attention_kwargs=cross_attention_kwargs, 
-            scheduler=scheduler, model=model
-        )
-        return (noisy_latents - noise_pred * sigma_t) / alpha_t
 
     def state_dict(self, **kwargs):
         # remove lpips_loss
@@ -213,14 +211,14 @@ class Zero123PlusGaussian(nn.Module):
         images = einops.rearrange(images, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2) 
 
         # scale as in zero123plus
-        latents = self.encode_image(images)
+        latents = encode_image(images, self.vae)
         t = torch.tensor([10] * B, device=latents.device)
         latents = self.pipe.scheduler.add_noise(latents, torch.randn_like(latents, device=latents.device), t)
-        x = self.predict_x0(
-            latents, text_embeddings, t=10, guidance_scale=1.0, 
+        x = predict_x0(
+            self.unet, latents, text_embeddings, t=10, guidance_scale=1.0, 
             cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
         # x = torch.randn([B, 4, 96, 64], device=images.device)
-        x = self.decode_latents(x) # (B, 14, H, W)
+        x = decode_latents(x, self.decoder) # (B, 14, H, W)
         # x = self.conv(x)
 
         x = einops.rearrange(x, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2) # (B*6, 14, H, W)

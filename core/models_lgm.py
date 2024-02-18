@@ -28,6 +28,7 @@ class LGM(nn.Module):
             mid_attention=self.opt.mid_attention,
             up_channels=self.opt.up_channels,
             up_attention=self.opt.up_attention,
+            num_frames=self.opt.num_input_views
         )
 
         # last conv

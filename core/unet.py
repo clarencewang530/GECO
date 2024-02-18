@@ -112,6 +112,7 @@ class DownBlock(nn.Module):
         attention: bool = True,
         attention_heads: int = 16,
         skip_scale: float = 1,
+        num_frames: int = 6,
     ):
         super().__init__()
  
@@ -121,7 +122,7 @@ class DownBlock(nn.Module):
             in_channels = in_channels if i == 0 else out_channels
             nets.append(ResnetBlock(in_channels, out_channels, skip_scale=skip_scale))
             if attention:
-                attns.append(MVAttention(out_channels, attention_heads, skip_scale=skip_scale))
+                attns.append(MVAttention(out_channels, attention_heads, skip_scale=skip_scale, num_frames=num_frames))
             else:
                 attns.append(None)
         self.nets = nn.ModuleList(nets)
@@ -155,6 +156,7 @@ class MidBlock(nn.Module):
         attention: bool = True,
         attention_heads: int = 16,
         skip_scale: float = 1,
+        num_frames: int = 6,
     ):
         super().__init__()
 
@@ -166,7 +168,7 @@ class MidBlock(nn.Module):
         for i in range(num_layers):
             nets.append(ResnetBlock(in_channels, in_channels, skip_scale=skip_scale))
             if attention:
-                attns.append(MVAttention(in_channels, attention_heads, skip_scale=skip_scale))
+                attns.append(MVAttention(in_channels, attention_heads, skip_scale=skip_scale, num_frames=num_frames))
             else:
                 attns.append(None)
         self.nets = nn.ModuleList(nets)
@@ -192,6 +194,7 @@ class UpBlock(nn.Module):
         attention: bool = True,
         attention_heads: int = 16,
         skip_scale: float = 1,
+        num_frames: int = 6,
     ):
         super().__init__()
 
@@ -203,7 +206,7 @@ class UpBlock(nn.Module):
 
             nets.append(ResnetBlock(cin + cskip, out_channels, skip_scale=skip_scale))
             if attention:
-                attns.append(MVAttention(out_channels, attention_heads, skip_scale=skip_scale))
+                attns.append(MVAttention(out_channels, attention_heads, skip_scale=skip_scale, num_frames=num_frames))
             else:
                 attns.append(None)
         self.nets = nn.ModuleList(nets)
@@ -243,6 +246,7 @@ class UNet(nn.Module):
         up_attention: Tuple[bool, ...] = (True, True, False),
         layers_per_block: int = 2,
         skip_scale: float = np.sqrt(0.5),
+        num_frames: int = 6,
     ):
         super().__init__()
 
@@ -262,11 +266,12 @@ class UNet(nn.Module):
                 downsample=(i != len(down_channels) - 1), # not final layer
                 attention=down_attention[i],
                 skip_scale=skip_scale,
+                num_frames=num_frames
             ))
         self.down_blocks = nn.ModuleList(down_blocks)
 
         # mid
-        self.mid_block = MidBlock(down_channels[-1], attention=mid_attention, skip_scale=skip_scale)
+        self.mid_block = MidBlock(down_channels[-1], attention=mid_attention, skip_scale=skip_scale, num_frames=num_frames)
 
         # up
         up_blocks = []
@@ -282,6 +287,7 @@ class UNet(nn.Module):
                 upsample=(i != len(up_channels) - 1), # not final layer
                 attention=up_attention[i],
                 skip_scale=skip_scale,
+                num_frames=num_frames
             ))
         self.up_blocks = nn.ModuleList(up_blocks)
 

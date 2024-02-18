@@ -407,7 +407,7 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         generator = None
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
-        latents = torch.randn([4, num_channels_latents, height//self.vae_scale_factor, width//self.vae_scale_factor], device=device, dtype=prompt_embeds.dtype)
+        latents = torch.randn([1, num_channels_latents, height//self.vae_scale_factor, width//self.vae_scale_factor], device=device, dtype=prompt_embeds.dtype)
         # latents = torch.load("latents.pt").to(device, dtype=prompt_embeds.dtype)[:4]
         do_classifier_free_guidance = guidance_scale > 1.0
         # # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline

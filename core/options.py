@@ -20,7 +20,7 @@ class Options:
     output_size: int = 256
 
     ### zero123plus
-    model_type: str = 'Zero123PlusGaussian'
+    model_type: str = 'LGM'
     model_path: str = 'sudo-ai/zero123plus-v1.1' 
     custom_pipeline: str ='./zero123plus/zero123plus.py'
     bg: float = 0.5
@@ -74,6 +74,8 @@ class Options:
     ### testing
     # test image path
     test_path: Optional[str] = None
+    pipeline: str = 'zero123plus1step'
+    generate_mv: bool = True
 
     ### misc
     # nvdiffrast backend setting
