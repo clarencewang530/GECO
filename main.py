@@ -8,6 +8,7 @@ from core.models_gs import Zero123PlusGaussian
 from core.models_lgm import LGM
 from core.models_single import SingleSplatterImage
 from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.utils import set_seed
 from safetensors.torch import load_file
 from core.dataset import ObjaverseDataset as Dataset
 
@@ -16,6 +17,7 @@ from datetime import datetime
 import torch.utils.tensorboard as tensorboard
 
 def main():    
+    set_seed(42)
     opt = tyro.cli(AllConfigs)
 
     # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
