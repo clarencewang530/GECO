@@ -22,7 +22,7 @@ class Options:
     ### zero123plus
     model_type: str = 'LGM'
     model_path: str = 'sudo-ai/zero123plus-v1.1' 
-    custom_pipeline: str ='./zero123plus/zero123plus.py'
+    custom_pipeline: str ='./pipelines/zero123plus.py'
     bg: float = 0.5
 
     pretrained_as_init: bool = False
@@ -75,7 +75,7 @@ class Options:
     # test image path
     test_path: Optional[str] = None
     pipeline: str = 'zero123plus1step'
-    generate_mv: bool = True
+    generate_mv: bool = False
 
     ### misc
     # nvdiffrast backend setting

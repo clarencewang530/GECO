@@ -40,9 +40,9 @@ def encode_image(image, vae, is_zero123plus=True):
 def decode_latents(latents, decoder, is_zero123plus=True):
     if is_zero123plus:
         latents = unscale_latents(latents)
-        latents = latents / decoder.config.scaling_factor
-        image = decoder.decode(latents, return_dict=False)[0]
-        # image = decoder(latents)
+        latents = latents / decoder.vae.config.scaling_factor
+        # image = decoder.decode(latents, return_dict=False)[0]
+        image = decoder(latents)
         image = unscale_image(image)
     else:
         image = decoder.decode(latents, return_dict=False)[0]
@@ -165,16 +165,11 @@ class Zero123PlusGaussian(nn.Module):
 
         self.pipe.prepare() 
         self.vae = self.pipe.vae.requires_grad_(False).eval()
-        self.vae.decoder.requires_grad_(True).train()
+        self.vae.decoder.requires_grad_(False).eval()
 
         self.unet = self.pipe.unet.eval().requires_grad_(False)
         self.pipe.scheduler = DDPMScheduler.from_config(self.pipe.scheduler.config)
         self.decoder = UNetDecoder(self.vae)
-
-        # with torch.no_grad():
-        #     cond = to_rgb_image(Image.open('/mnt/kostas-graid/sw/envs/chenwang/workspace/lrm-zero123/assets/9000-9999/0a9b36d36e904aee8b51e978a7c0acfd/000.png'))
-        #     text_embeddings, cross_attention_kwargs = self.pipe.prepare_conditions(cond, guidance_scale=4.0)
-        #     cross_attention_kwargs_stu = cross_attention_kwargs
 
         # add auxiliary layer for generating gaussian (14 channels)
         # self.conv = nn.Conv2d(3, 14, kernel_size=3, stride=1, padding=1)
