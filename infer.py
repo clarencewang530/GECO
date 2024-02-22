@@ -26,74 +26,11 @@ from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler, DDPMSc
 from PIL import Image
 import einops
 import pickle
+import time
+import json
 
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
-
-opt = tyro.cli(AllConfigs)
-
-# model
-if opt.model_type == 'Zero123PlusGaussian':
-    model = Zero123PlusGaussian(opt)
-elif opt.model_type == 'LGM':
-    model = LGM(opt)
-
-# resume pretrained checkpoint
-if opt.resume is not None:
-    if opt.resume.endswith('safetensors'):
-        ckpt = load_file(opt.resume, device='cpu')
-    else:
-        ckpt = torch.load(opt.resume, map_location='cpu')
-    model.load_state_dict(ckpt, strict=False)
-    print(f'[INFO] Loaded checkpoint from {opt.resume}')
-else:
-    print(f'[WARN] model randomly initialized, are you sure?')
-
-# device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = model.half().to(device)
-model.eval()
-
-tan_half_fov = np.tan(0.5 * np.deg2rad(opt.fovy))
-proj_matrix = torch.zeros(4, 4, dtype=torch.float32, device=device)
-proj_matrix[0, 0] = 1 / tan_half_fov
-proj_matrix[1, 1] = 1 / tan_half_fov
-proj_matrix[2, 2] = (opt.zfar + opt.znear) / (opt.zfar - opt.znear)
-proj_matrix[3, 2] = - (opt.zfar * opt.znear) / (opt.zfar - opt.znear)
-proj_matrix[2, 3] = 1
-
-def generate_mv_image(image, pipe):
-    if opt.pipeline == 'mvdream':
-        # expect input to be (0, 1)
-        mv_image = pipe('', image.astype(np.float32) / 255.0, guidance_scale=5.0, num_inference_steps=30, elevation=0)
-        mv_image = np.stack([mv_image[1], mv_image[2], mv_image[3], mv_image[0]], axis=0) # [4, 256, 256, 3], float32, (0, 1)
-        images = []
-        for image in mv_image:
-            image = rembg.remove((image*255.0).astype(np.uint8)).astype(np.float32) / 255.0
-            if image.shape[-1] == 4:
-                image = image[..., :3] * image[..., 3:4] + (1 - image[..., 3:4])
-            images.append(image)
-        mv_image = np.stack(images, axis=0) # [6, 256, 256, 3]
-    elif opt.pipeline.startswith('zero123plus'):
-        if opt.pipeline == 'zero123plus':
-            mv_image = pipe(Image.fromarray(image.astype(np.uint8)), num_inference_steps=75).images[0]
-        else:
-            text_embeddings, cross_attention_kwargs = pipe.prepare_conditions(image.astype(np.uint8), guidance_scale=4.0)
-            cross_attention_kwargs_stu = cross_attention_kwargs
-            with torch.no_grad():
-                out = predict_x0(pipe.unet, torch.randn([1, 4, 120, 80]).to(device), text_embeddings, t=800, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=pipe.scheduler, model='zero123plus')
-                out = (decode_latents(out, pipe.vae, True)[0] + 1)*127.5 # (-1, 1) -> (0, 255)
-            mv_image = Image.fromarray(out.permute(1, 2, 0).detach().clip(0, 255).cpu().numpy().astype(np.uint8))
-        mv_image = np.array(mv_image.resize((512, 768))) # TODO: why 512x768 cannot work directly
-        mv_image = einops.rearrange(mv_image, '(h2 h) (w2 w) c -> (h2 w2) h w c', h2=3, w2=2).astype(np.uint8) # [6, 256, 256, 3]
-        images = []
-        for image in mv_image:
-            image = rembg.remove(image).astype(np.float32) / 255.0
-            if image.shape[-1] == 4:
-                image = image[..., :3] * image[..., 3:4] + (1 - image[..., 3:4])
-            images.append(image)
-        mv_image = np.stack(images, axis=0) # [6, 256, 256, 3]
-    return mv_image
 
 def params_and_buffers(module):
     assert isinstance(module, torch.nn.Module)
@@ -113,140 +50,172 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False):
         if name in src_tensors:
             tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
 
-if opt.pipeline == 'mvdream':
-    pipe = MVDreamPipeline.from_pretrained(
-        "ashawkey/imagedream-ipmv-diffusers", # remote weights
-        torch_dtype=torch.float16,
-        trust_remote_code=True,
-        # local_files_only=True,
-    ).to(device)
-elif opt.pipeline.startswith('zero123plus'):
-    import sys
-    sys.path.append('./pipelines/')
-    pipe = DiffusionPipeline.from_pretrained(
-        "sudo-ai/zero123plus-v1.1",
-        custom_pipeline="./pipelines/zero123plus.py"
-    ).to(device)
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing='trailing'
-    )
-    if opt.pipeline == 'zero123plus1step':
-        pipe.prepare()
-        pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-        resume_pkl = '/home/chenwang/logs-bak/instant123/20240203/training-runs/zero123plus/zero123plus-gpus2-batch2-same-vsd-20240116-224428-new/network-snapshot-005000.pkl'
-        resume_data = pickle.load(open(resume_pkl, 'rb'))
-        copy_params_and_buffers(resume_data['G'], pipe.unet, require_all=False)
-        pipe.unet.eval()
+def default_rays_from_pose(device, cam_poses, opt):
+    from core.utils import get_rays
+    rays_embeddings = []
+    for i in range(cam_poses.shape[0]):
+        rays_o, rays_d = get_rays(cam_poses[i], opt.input_size, opt.input_size, opt.fovy) # [h, w, 3]
+        rays_plucker = torch.cat([torch.cross(rays_o, rays_d, dim=-1), rays_d], dim=-1) # [h, w, 6]
+        rays_embeddings.append(rays_plucker)
+    rays_embeddings = torch.stack(rays_embeddings, dim=0).permute(0, 3, 1, 2).contiguous().to(device) # [V, 6, h, w]
+    return rays_embeddings
 
-# # load rembg
-# bg_remover = rembg.new_session()
+class Inferrer:
+    def __init__(self, opt):
+        self.opt = opt
+        # model
+        if opt.model_type == 'Zero123PlusGaussian':
+            self.model = Zero123PlusGaussian(opt)
+        elif opt.model_type == 'LGM':
+            self.model = LGM(opt)
 
-# process function
-def process(opt: Options, path):
-    name = os.path.splitext(os.path.basename(path))[0]
-    print(f'[INFO] Processing {path} --> {name}')
-    os.makedirs(opt.workspace, exist_ok=True)
-
-    # input_image = kiui.read_image(path, mode='uint8')
-    # carved_image = rembg.remove(input_image, session=bg_remover) # [H, W, 4]
-
-    poses = [np.load(f'{path}/{i:03d}.npy', allow_pickle=True).item() for i in range(1, 56)]
-    elevations, azimuths = [-pose['elevation'] for pose in poses], [pose['azimuth'] for pose in poses]
-    imgs = [np.array(Image.open(f'{path}/{i:03d}.png')) / 255.0 for i in range(1, 7)]
-    imgs = [img[..., :3] * img[..., 3:4] + (1 - img[..., 3:4]) for img in imgs]
-    mv_image = np.stack(imgs, axis=0)
-
-    cond = np.array(Image.open(f'{path}/000.png').resize((opt.input_size, opt.input_size)))
-    mask = cond[..., 3:4] / 255
-    cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
-
-    if opt.generate_mv: 
-        mv_image = generate_mv_image(cond, pipe)
-        print(f'using {opt.pipeline}')
-        kiui.write_image(f'{opt.workspace}/mv_image.png', mv_image.transpose(1, 0, 2, 3).reshape(-1, mv_image.shape[1]*mv_image.shape[0], 3))
-
-    ## below is the same for all models
-    # generate gaussians
-    input_image = torch.from_numpy(mv_image).permute(0, 3, 1, 2).float().to(device) # [4, 3, 256, 256]
-    input_image = F.interpolate(input_image, size=(opt.input_size, opt.input_size), mode='bilinear', align_corners=False)
-    if opt.model_type == 'LGM':
-        if opt.pipeline.startswith('zero123plus'):
-            rays_embeddings = model.prepare_default_rays(device, elevations[:6], azimuths[:6])
+        # resume pretrained checkpoint
+        if opt.resume is not None:
+            if opt.resume.endswith('safetensors'):
+                ckpt = load_file(opt.resume, device='cpu')
+            else:
+                ckpt = torch.load(opt.resume, map_location='cpu')
+            self.model.load_state_dict(ckpt, strict=False)
+            print(f'[INFO] Loaded checkpoint from {opt.resume}')
         else:
-            rays_embeddings = model.prepare_default_rays(device, [0, 0, 0, 0], [0, 90, 180, 270])
-        input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
-        input_image = torch.cat([input_image, rays_embeddings], dim=1).unsqueeze(0) # [1, 4, 9, H, W]
+            print(f'[WARN] model randomly initialized, are you sure?')
 
-    with torch.no_grad():
-        with torch.autocast(device_type='cuda', dtype=torch.float16):
-            # generate gaussians
-            
-            gaussians = model.forward_gaussians(input_image) if opt.model_type == 'LGM' else model.forward_gaussians(input_image.unsqueeze(0), cond.astype(np.uint8))
-        
-        # save gaussians
-        model.gs.save_ply(gaussians, os.path.join(opt.workspace, name + '.ply'))
+        # device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.half().to(self.device)
+        self.model.eval()
 
-        # render at gt poses
-        for (i, (ele, azi)) in enumerate(zip(elevations[6:], azimuths[6:])):
-            cam_poses = torch.from_numpy(orbit_camera(ele, azi, radius=opt.cam_radius, opengl=True)).unsqueeze(0).to(device)
+        tan_half_fov = np.tan(0.5 * np.deg2rad(opt.fovy))
+        proj_matrix = torch.zeros(4, 4, dtype=torch.float32, device=self.device)
+        proj_matrix[0, 0] = 1 / tan_half_fov
+        proj_matrix[1, 1] = 1 / tan_half_fov
+        proj_matrix[2, 2] = (opt.zfar + opt.znear) / (opt.zfar - opt.znear)
+        proj_matrix[3, 2] = - (opt.zfar * opt.znear) / (opt.zfar - opt.znear)
+        proj_matrix[2, 3] = 1
+        self.proj_matrix = proj_matrix
+        self.pipe = self.load_pipeline(opt.pipeline)
+    
+    def load_pipeline(self, pipeline):
+        if pipeline == 'mvdream':
+            pipe = MVDreamPipeline.from_pretrained(
+                "ashawkey/imagedream-ipmv-diffusers", # remote weights
+                torch_dtype=torch.float16,
+                trust_remote_code=True,
+                # local_files_only=True,
+            ).to(self.device)
+        elif pipeline.startswith('zero123plus'):
+            import sys
+            sys.path.append('./pipelines/')
+            pipe = DiffusionPipeline.from_pretrained(
+                "sudo-ai/zero123plus-v1.1",
+                custom_pipeline="./pipelines/zero123plus.py",
+                dtype=torch.float16,
+            ).to(self.device)
+            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
+                pipe.scheduler.config, timestep_spacing='trailing'
+            )
+            if opt.pipeline == 'zero123plus1step':
+                pipe.prepare()
+                pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+                # resume_pkl = '/home/chenwang/logs-bak/instant123/20240203/training-runs/zero123plus/zero123plus-gpus2-batch2-same-vsd-20240116-224428-new/network-snapshot-005000.pkl'
+                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-000500.pkl'
+                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-064415-cond500/network-snapshot-005000.pkl'
+                # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-010000.pkl'
+                resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-030000.pkl'
+                resume_data = pickle.load(open(resume_pkl, 'rb'))
+                copy_params_and_buffers(resume_data['G'], pipe.unet, require_all=False)
+                pipe.unet.eval()
+                pipe.unet.is_generator = True
+        return pipe
+ 
+    def generate_mv_image(self, image):
+        t1 = time.time()
+        if self.opt.pipeline == 'mvdream':
+            # expect input to be (0, 1)
+            mv_image = self.pipe('', image.astype(np.float32) / 255.0, guidance_scale=5.0, num_inference_steps=30, elevation=0)
+            mv_image = np.stack([mv_image[1], mv_image[2], mv_image[3], mv_image[0]], axis=0) # [4, 256, 256, 3], float32, (0, 1)
+        elif self.opt.pipeline.startswith('zero123plus'):
+            if self.opt.pipeline == 'zero123plus':
+                mv_image = self.pipe(Image.fromarray(image.astype(np.uint8)), num_inference_steps=1).images[0]
+            else:
+                text_embeddings, cross_attention_kwargs = self.pipe.prepare_conditions(image.astype(np.uint8), guidance_scale=4.0)
+                cross_attention_kwargs_stu = cross_attention_kwargs
+                print(f'preparing time: {time.time() - t1:.2f}s')
+                with torch.no_grad():
+                    out = predict_x0(self.pipe.unet, torch.randn([1, 4, 120, 80], dtype=text_embeddings.dtype, device=self.device), text_embeddings, t=800, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
+                    out = (decode_latents(out, self.pipe.vae, True)[0] + 1)*127.5 # (-1, 1) -> (0, 255)
+                mv_image = Image.fromarray(out.permute(1, 2, 0).detach().clip(0, 255).cpu().numpy().astype(np.uint8))
+            mv_image = np.array(mv_image.resize((512, 768))) # TODO: why 512x768 cannot work directly
+            mv_image = einops.rearrange(mv_image, '(h2 h) (w2 w) c -> (h2 w2) h w c', h2=3, w2=2).astype(np.uint8) # [6, 256, 256, 3]
+            mv_image = mv_image.astype(np.float32) / 255.0
+        print(f'generation time: {time.time() - t1:.2f}s')
+        return mv_image
+    
+    def render_video(self, elevations, azimuths, gaussians):
+        images = []
+        for (i, (ele, azi)) in enumerate(zip(elevations, azimuths)):
+            cam_poses = torch.from_numpy(orbit_camera(ele, azi, radius=self.opt.cam_radius, opengl=True)).unsqueeze(0).to(self.device)
             cam_poses[:, :3, 1:3] *= -1 # invert up & forward direction
             
             # cameras needed by gaussian rasterizer
             cam_view = torch.inverse(cam_poses).transpose(1, 2) # [V, 4, 4]
-            cam_view_proj = cam_view @ proj_matrix # [V, 4, 4]
+            cam_view_proj = cam_view @ self.proj_matrix # [V, 4, 4]
             cam_pos = - cam_poses[:, :3, 3] # [V, 3]
 
-            image = model.gs.render(gaussians, cam_view.unsqueeze(0), cam_view_proj.unsqueeze(0), cam_pos.unsqueeze(0), scale_modifier=1)['image']
+            image = self.model.gs.render(gaussians, cam_view.unsqueeze(0), cam_view_proj.unsqueeze(0), cam_pos.unsqueeze(0), scale_modifier=1)['image']
             out = (image.squeeze(1).permute(0,2,3,1).contiguous().float().cpu().numpy() * 255).astype(np.uint8)
-            kiui.write_image(f'{opt.workspace}/{i+6:03d}.png', out[0])
+            images.append(out)
+            # kiui.write_image(f'{self.opt.workspace}/{i+6:03d}.png', out[0])
+        return np.concatenate(images, axis=0)
+    
+    def infer(self, cond, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        t1 = time.time()
 
-        # render 360 video 
-        images = []
-        elevation = 0
+        if self.opt.pipeline.startswith('zero123plus'):
+            elevations, azimuths = [-30, 20, -30, 20, -30, 20], [30, 90, 150, 210, 270, 330]
+        elif self.opt.pipeline == 'mvdream':
+            elevations, azimuths = [0, 0, 0, 0], [0, 90, 180, 270]
+        if self.opt.include_input:
+            elevations = [0] + elevations
+            azimuths = [0] + azimuths
+        cams = [orbit_camera(ele, azi, radius=self.opt.cam_radius) for (ele, azi) in zip(elevations, azimuths)]
+        cam_poses = torch.from_numpy(np.stack(cams, axis=0))
 
-        if opt.fancy_video:
+        mv_image = self.generate_mv_image(cond)
+        input_image = torch.from_numpy(mv_image).permute(0, 3, 1, 2).float().to(self.device) # [4, 3, 256, 256]
+        input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
+        if opt.model_type == 'LGM':
+            if opt.pipeline.startswith('zero123plus'):
+                # rays_embeddings = model.prepare_default_rays(device, elevations, azimuths)
+                rays_embeddings = default_rays_from_pose(self.device, cam_poses, self.opt)
+            else:
+                rays_embeddings = self.model.prepare_default_rays(self.device, [0, 0, 0, 0], [0, 90, 180, 270])
+            input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
+            input_image = torch.cat([input_image, rays_embeddings], dim=1).unsqueeze(0) # [1, 4, 9, H, W]
+        
+        with torch.no_grad():
+            with torch.autocast(device_type='cuda', dtype=torch.float16):    
+                gaussians = self.model.forward_gaussians(input_image) if self.opt.model_type == 'LGM' else model.forward_gaussians(input_image.unsqueeze(0), cond.astype(np.uint8))
+                print('all time', time.time() - t1)
+                ## saving gaussians and video
+                self.model.gs.save_ply(gaussians, os.path.join(out_dir, 'output.ply'))
+                images = self.render_video(np.arange(0, 360, 2, dtype=np.int32) * 0, np.arange(0, 360, 2, dtype=np.int32), gaussians)
+                imageio.mimwrite(os.path.join(out_dir, 'output.mp4'), images, fps=30)
 
-            azimuth = np.arange(0, 720, 4, dtype=np.int32)
-            for azi in tqdm.tqdm(azimuth):
-                
-                cam_poses = torch.from_numpy(orbit_camera(elevation, azi, radius=opt.cam_radius, opengl=True)).unsqueeze(0).to(device)
+if __name__ == "__main__":
+    opt = tyro.cli(AllConfigs)
+    inferer = Inferrer(opt)
 
-                cam_poses[:, :3, 1:3] *= -1 # invert up & forward direction
-                
-                # cameras needed by gaussian rasterizer
-                cam_view = torch.inverse(cam_poses).transpose(1, 2) # [V, 4, 4]
-                cam_view_proj = cam_view @ proj_matrix # [V, 4, 4]
-                cam_pos = - cam_poses[:, :3, 3] # [V, 3]
-
-                scale = min(azi / 360, 1)
-
-                image = model.gs.render(gaussians, cam_view.unsqueeze(0), cam_view_proj.unsqueeze(0), cam_pos.unsqueeze(0), scale_modifier=scale)['image']
-                images.append((image.squeeze(1).permute(0,2,3,1).contiguous().float().cpu().numpy() * 255).astype(np.uint8))
-        else:
-            azimuth = np.arange(0, 360, 2, dtype=np.int32)
-            for azi in tqdm.tqdm(azimuth):
-                
-                cam_poses = torch.from_numpy(orbit_camera(elevation, azi, radius=opt.cam_radius, opengl=True)).unsqueeze(0).to(device)
-
-                cam_poses[:, :3, 1:3] *= -1 # invert up & forward direction
-                
-                # cameras needed by gaussian rasterizer
-                cam_view = torch.inverse(cam_poses).transpose(1, 2) # [V, 4, 4]
-                cam_view_proj = cam_view @ proj_matrix # [V, 4, 4]
-                cam_pos = - cam_poses[:, :3, 3] # [V, 3]
-
-                image = model.gs.render(gaussians, cam_view.unsqueeze(0), cam_view_proj.unsqueeze(0), cam_pos.unsqueeze(0), scale_modifier=1)['image']
-                images.append((image.squeeze(1).permute(0,2,3,1).contiguous().float().cpu().numpy() * 255).astype(np.uint8))
-
-        images = np.concatenate(images, axis=0)
-        imageio.mimwrite(os.path.join(opt.workspace, name + '.mp4'), images, fps=30)
-
-
-assert opt.test_path is not None
-# if os.path.isdir(opt.test_path):
-#     file_paths = glob.glob(os.path.join(opt.test_path, "*"))
-# else:
-#     file_paths = [opt.test_path]
-file_paths = [opt.test_path]
-for path in file_paths:
-    process(opt, path)
+    file_paths = json.load(open(opt.test_path, 'r'))
+    ## testing
+    for key in file_paths.keys():
+        print(key)
+        cond = np.array(Image.open(f'{file_paths[key]}').resize((opt.input_size, opt.input_size)))
+        if cond.shape[-1] != 4:
+            cond = rembg.remove(cond).astype(np.float32)
+            print('removing background, which may take extra time')
+        mask = cond[..., 3:4] / 255
+        cond_input = cond[..., :3] * mask + (1 - mask) * 255
+        cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
+        inferer.infer(cond, f'{opt.workspace}/{key}/2.5w-cond200/')

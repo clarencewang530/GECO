@@ -22,24 +22,26 @@ class ObjaverseDataset(Dataset):
     def __init__(self, opt: Options, training=True):
         
         self.opt = opt
-        if self.opt.model_type == 'LGM':
-            self.opt.bg = 1.0
+        # if self.opt.model_type == 'LGM':
+        #     self.opt.bg = 1.0
         self.training = training
 
         # # TODO: remove this barrier
         # self._warn()
 
         # TODO: load the list of objects for training
-        self.items = ["/scratch/inf0/user/lliu/chenwang/data-1000/0a9b36d36e904aee8b51e978a7c0acfd"]
+        self.items = []
         # with open('TODO: file containing the list', 'r') as f:
-        #     for line in f.readlines():
-        #         self.items.append(line.strip())
+            # for line in f.readlines():
+            #     self.items.append(line.strip())
+        import glob
+        self.items = sorted(glob.glob(f'{opt.data_path}/**'))
 
         # naive split
-        # if self.training:
-        #     self.items = self.items[:-self.opt.batch_size]
-        # else:
-        #     self.items = self.items[-self.opt.batch_size:]
+        if self.training:
+            self.items = self.items[:-self.opt.batch_size]
+        else:
+            self.items = self.items[-self.opt.batch_size:]
         
         # default camera intrinsics
         self.tan_half_fov = np.tan(0.5 * np.deg2rad(self.opt.fovy))
@@ -66,20 +68,23 @@ class ObjaverseDataset(Dataset):
         
         vid_cnt = 0
 
-        # TODO: choose views, based on your rendering settings
-        # if self.training:
-        #     # input views are in (36, 72), other views are randomly selected
-        #     vids = np.random.permutation(np.arange(36, 73))[:self.opt.num_input_views].tolist() + np.random.permutation(100).tolist()
-        # else:
-        #     # fixed views
-        #     vids = np.arange(36, 73, 4).tolist() + np.arange(100).tolist()
-        vids = np.arange(1, 10)[:self.opt.num_input_views].tolist() + np.random.permutation(50).tolist()
+        if self.training:
+            # input views are in (36, 72), other views are randomly selected
+            vids = np.random.permutation(np.arange(0, 25))[:self.opt.num_input_views].tolist() + np.random.permutation(50).tolist()
+            # curr_bg = np.random.uniform(0.0, 1.0)
+            curr_bg = 0.5
+        else:
+            # fixed views
+            # vids = np.arange(36, 73, 4).tolist() + np.arange(100).tolist()
+            vids = np.arange(0, 50).tolist()
+            curr_bg = self.opt.bg
+        # vids = np.arange(1, 10)[:self.opt.num_input_views].tolist() + np.random.permutation(50).tolist()
 
         cond_path = os.path.join(uid, f'000.png')
         from PIL import Image
         cond = np.array(Image.open(cond_path).resize((self.opt.input_size, self.opt.input_size)))
         mask = cond[..., 3:4] / 255
-        cond = cond[..., :3] * mask + (1 - mask) * int(self.opt.bg * 255)
+        cond = cond[..., :3] * mask + (1 - mask) * int(curr_bg * 255)
         results['cond'] = cond.astype(np.uint8)
         
         for vid in vids:
@@ -115,7 +120,7 @@ class ObjaverseDataset(Dataset):
           
             image = image.permute(2, 0, 1) # [4, 512, 512]
             mask = image[3:4] # [1, 512, 512]
-            image = image[:3] * mask + (1 - mask) * self.opt.bg # [3, 512, 512], to white bg
+            image = image[:3] * mask + (1 - mask) * curr_bg # [3, 512, 512], to white bg
             image = image[[2,1,0]].contiguous() # bgr to rgb
 
             images.append(image)
@@ -159,7 +164,6 @@ class ObjaverseDataset(Dataset):
 
         # resize render ground-truth images, range still in [0, 1]
         results['images_output'] = F.interpolate(images, size=(self.opt.output_size, self.opt.output_size), mode='bilinear', align_corners=False) # [V, C, output_size, output_size]
-        print(results['images_output'].shape)
         results['masks_output'] = F.interpolate(masks.unsqueeze(1), size=(self.opt.output_size, self.opt.output_size), mode='bilinear', align_corners=False) # [V, 1, output_size, output_size]
 
         # build rays for input views
