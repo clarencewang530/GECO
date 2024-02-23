@@ -92,3 +92,11 @@ def unscale_latents(latents):
 def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
+
+def scale_latents(latents):
+    latents = (latents - 0.22) * 0.75
+    return latents
+
+def scale_image(image):
+    image = image / 0.8 * 0.5
+    return image

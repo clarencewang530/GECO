@@ -8,8 +8,7 @@ from PIL import Image
 import numpy as np
 import torch
 import dnnlib
-from torch_utils import misc
-from torch_utils import training_stats
+from torch_utils import misc, training_stats
 from torch_utils import distributed as dist
 
 import torch.nn.functional as F
@@ -20,27 +19,20 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from transformers import logging as transformers_logging
 transformers_logging.set_verbosity_error()  # disable warning
 
-from diffusers import AutoencoderKL, UNet2DConditionModel
 from diffusers import DDIMScheduler, DDPMScheduler
 from diffusers import DiffusionPipeline
-from transformers import T5EncoderModel
 
 from utils.diff import extract_lora_diffusers, predict_noise0_diffuser, predict_x0, predict_x0_ldm
 from utils.saving import *
-from training.random_camera import *
+from training.lgm_loader import LGMLoader, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+import einops
 
-class PromptDataset(torch.utils.data.Dataset):
-    def __init__(self, prompt_list):
-        self.prompt_list = prompt_list
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+from kiui.cam import orbit_camera
+import kiui
 
-    def __len__(self):
-        return len(self.prompt_list)
-
-    def __getitem__(self, idx):
-        sample = self.prompt_list[idx]
-
-        return sample
-
+@torch.no_grad()
 def decode_latents(latents, vae, is_zero123plus):
     if is_zero123plus:
         latents = unscale_latents(latents)
@@ -49,6 +41,16 @@ def decode_latents(latents, vae, is_zero123plus):
         image = unscale_image(image)
     else:
         image = vae.decode(latents, return_dict=False)[0]
+    return image
+
+@torch.no_grad()
+def encode_image(image, vae, is_zero123plus=True):
+    if is_zero123plus:
+        image = scale_image(image)
+        image = vae.encode(image).latent_dist.sample() * vae.config.scaling_factor
+        image = scale_latents(image)
+    else:
+        image = vae.encode(image, return_dict=False)[0] * vae.config.scaling_factor
     return image
     
 #---------------------------------------------------------------------------
@@ -123,25 +125,7 @@ def training_loop(
     pipe = DiffusionPipeline.from_pretrained(Diff_kwargs.model_path, custom_pipeline=Diff_kwargs.custom_pipeline, torch_dtype=dtype).to(device)
     cross_attention_kwargs = {}
     cross_attention_kwargs_stu = {}
-    if Diff_kwargs.cond == 't2i':
-        if Diff_kwargs.prompt_path is not None:
-            if Diff_kwargs.prompt_path.endswith('.json'):
-                prompts = json.load(open(Diff_kwargs.prompt_path, 'r'))['dreamfusion']
-            elif Diff_kwargs.prompt_path.endswith('.parquet'):
-                import pandas as pd
-                prompts = pd.read_parquet(Diff_kwargs.prompt_path)['prompt'].tolist()
-            dist.print0("Num of prompts: {}".format(len(prompts)))
-            val_prompts = ["a photograph of an astronaut riding a horse", "a DSLR photo of a cat jumping over a fence, high-res", "a poodle wearing a baseball cap and holding a dictionary in hand", "a blue Porsche 356 parked in front of a brick wall"]
-        else:
-            prompts = ['a chimpanzee holding a peeled banana']
-            val_prompts = prompts
-
-        with torch.no_grad():
-            text_embeds, negative_embeds = pipe.encode_prompt(val_prompts, num_images_per_prompt=1, device=device, do_classifier_free_guidance=True)
-            text_embeddings_vis = torch.cat([negative_embeds, text_embeds])
-            if gen_type == 'sin':
-                text_embeddings = text_embeddings_vis
-    elif arch == 'unet_zero123plus':
+    if arch == 'unet_zero123plus':
         pipe.prepare()
         with torch.no_grad():
             cond = to_rgb_image(Image.open('./data/lysol.png'))
@@ -172,7 +156,14 @@ def training_loop(
     scheduler = pipe.scheduler
     torch.cuda.empty_cache()
 
-    # Load LGM
+    if Diff_kwargs.use_lgm:
+        dist.print0('Loading LGM...')
+        lgm_loader = LGMLoader(device)
+        lgm, opt = lgm_loader.model, lgm_loader.opt
+        elevations, azimuths = [-30, 20, -30, 20, -30, 20], [30, 90, 150, 210, 270, 330]
+        rays_embeddings = lgm.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(batch_gpu, 1, 1, 1, 1)
+        cam_view, cam_view_proj, cam_pos = lgm_loader.get_cam_poses(elevations, azimuths, batch_gpu)
+        bg_color = torch.ones(3, dtype=dtype, device=device) * 0.5
 
     if gen_type == 'sin':
         all_images = torch.nn.Parameter(torch.rand(1, 4, int(ratio*resolution), resolution, device=device))
@@ -281,8 +272,18 @@ def training_loop(
                 indices = torch.randperm(text_embeds.shape[0])[:batch_gpu]
                 text_embeddings = torch.cat([negative_embeds[indices], text_embeds[indices]])
             particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
-            # use lgm to transform particles
-
+            if Diff_kwargs.use_lgm:
+                particles = decode_latents(particles, vae, arch == 'unet_zero123plus').clamp(-1, 1) # (-1, 1)
+                particles = (particles + 1) / 2
+                particles = einops.rearrange(particles, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
+                input_image = F.interpolate(particles, size=(opt.input_size, opt.input_size), mode='bilinear', align_corners=False)
+                input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(batch_gpu, 6, 3, opt.input_size, opt.input_size) # [1, 4, 3, 256, 256]
+                input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
+                gaussians = lgm.forward_gaussians(input_image)
+                image = lgm.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
+                image = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
+                particles = encode_image(image, vae, arch == 'unet_zero123plus')
+            
 
         # Execute training loop.
         # (1) Train Generator

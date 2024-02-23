@@ -83,6 +83,7 @@ class RefOnlyNoisedUNet(torch.nn.Module):
         self.unet = unet
         self.train_sched = train_sched
         self.val_sched = val_sched
+        self.is_generator = False
 
         unet_lora_attn_procs = dict()
         for name, _ in unet.attn_processors.items():
@@ -124,15 +125,25 @@ class RefOnlyNoisedUNet(torch.nn.Module):
         cond_lat = cross_attention_kwargs['cond_lat']
         is_cfg_guidance = cross_attention_kwargs.get('is_cfg_guidance', False)
         noise = torch.randn_like(cond_lat)
-        if self.training:
-            noisy_cond_lat = self.train_sched.add_noise(cond_lat, noise, timestep)
-            noisy_cond_lat = self.train_sched.scale_model_input(noisy_cond_lat, timestep)
+        if self.is_generator:
+            # cond_timestep = torch.randint(199, 200, size=timestep.shape, device=timestep.device)
+            cond_timestep = torch.zeros_like(timestep, dtype=timestep.dtype, device=timestep.device)
+            # if self.training:
+            #     cond_timestep = torch.randint(200, size=timestep.shape, device=timestep.device)
+            # else:
+            #     cond_timestep = torch.zeros_like(timestep, dtype=timestep.dtype, device=timestep.device)
         else:
-            noisy_cond_lat = self.val_sched.add_noise(cond_lat, noise, timestep.reshape(-1))
-            noisy_cond_lat = self.val_sched.scale_model_input(noisy_cond_lat, timestep.reshape(-1))
+            cond_timestep = timestep
+        # cond_timestep = timestep
+        if self.training:
+            noisy_cond_lat = self.train_sched.add_noise(cond_lat, noise, cond_timestep)
+            noisy_cond_lat = self.train_sched.scale_model_input(noisy_cond_lat, cond_timestep)
+        else:
+            noisy_cond_lat = self.val_sched.add_noise(cond_lat, noise, cond_timestep.reshape(-1))
+            noisy_cond_lat = self.val_sched.scale_model_input(noisy_cond_lat, cond_timestep.reshape(-1))
         ref_dict = {}
         self.forward_cond(
-            noisy_cond_lat, timestep,
+            noisy_cond_lat, cond_timestep,
             encoder_hidden_states, class_labels,
             ref_dict, is_cfg_guidance, **kwargs
         )

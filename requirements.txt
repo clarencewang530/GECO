@@ -27,3 +27,4 @@ xatlas
 roma
 plyfile
 tensorboard
+einops

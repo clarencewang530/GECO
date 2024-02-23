@@ -1,0 +1,129 @@
+'# tyro YAML.
+
+  !dataclass:Options
+
+  batch_size: 8
+
+  bg: 0.5
+
+  cam_radius: 1.5
+
+  custom_pipeline: ./pipelines/zero123plus.py
+
+  data_mode: s3
+
+  down_attention: !!python/tuple
+
+  - false
+
+  - false
+
+  - false
+
+  - true
+
+  - true
+
+  - true
+
+  down_channels: !!python/tuple
+
+  - 64
+
+  - 128
+
+  - 256
+
+  - 512
+
+  - 1024
+
+  - 1024
+
+  eval_freq: 200
+
+  fancy_video: false
+
+  force_cuda_rast: false
+
+  fovy: 47.1
+
+  generate_mv: true
+
+  gradient_accumulation_steps: 1
+
+  gradient_clip: 1.0
+
+  include_input: false
+
+  input_size: 256
+
+  lambda_lpips: 1.0
+
+  lr: 0.0001
+
+  mid_attention: true
+
+  mixed_precision: bf16
+
+  model_path: sudo-ai/zero123plus-v1.1
+
+  model_type: LGM
+
+  num_epochs: 2000
+
+  num_input_views: 6
+
+  num_views: 8
+
+  num_workers: 8
+
+  output_size: 512
+
+  pipeline: zero123plus1step
+
+  pretrained_as_init: false
+
+  prob_cam_jitter: 0.5
+
+  prob_grid_distortion: 0.5
+
+  resume: /mnt/kostas-graid/sw/envs/chenwang/workspace/instant123/logs/ft_gray_0.5bg/LGM-20240222-022708/model.safetensors
+
+  save_freq: 200
+
+  splat_size: 128
+
+  test_path: /mnt/kostas-graid/sw/envs/chenwang/workspace/instant123/logs/test.json
+
+  up_attention: !!python/tuple
+
+  - true
+
+  - true
+
+  - true
+
+  - false
+
+  - false
+
+  up_channels: !!python/tuple
+
+  - 1024
+
+  - 1024
+
+  - 512
+
+  - 256
+
+  - 128
+
+  workspace: logs/test/
+
+  zfar: 2.5
+
+  znear: 0.5
+
+  '

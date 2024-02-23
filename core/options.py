@@ -31,7 +31,7 @@ class Options:
     # data mode (only support s3 now)
     data_mode: Literal['s3'] = 's3'
     # fovy of the dataset
-    fovy: float = 59.59
+    fovy: float = 47.1
     # camera near plane
     znear: float = 0.5
     # camera far plane
@@ -76,6 +76,7 @@ class Options:
     test_path: Optional[str] = None
     pipeline: str = 'zero123plus1step'
     generate_mv: bool = False
+    include_input: bool = False
 
     ### misc
     # nvdiffrast backend setting
@@ -109,7 +110,7 @@ config_defaults['big'] = Options(
     splat_size=128,
     output_size=512, # render & supervise Gaussians at a higher resolution.
     batch_size=8,
-    num_views=12,
+    num_views=8,
     gradient_accumulation_steps=1,
     mixed_precision='bf16',
 )

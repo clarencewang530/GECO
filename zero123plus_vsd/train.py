@@ -68,7 +68,7 @@ def launch_training(c, desc, outdir, dry_run):
 
     # Launch processes.
     print('Launching processes...')
-    torch.multiprocessing.set_start_method('spawn')
+    torch.multiprocessing.set_start_method('spawn', force=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         if c.num_gpus == 1:
             subprocess_fn(rank=0, c=c, temp_dir=temp_dir)
@@ -183,7 +183,7 @@ def main(**kwargs):
             c.Diff_kwargs.update(latent=False)
         elif opts.arch == 'unet_zero123plus' or opts.arch == 'unet_zero123':
             c.update(num_channels=4, ratio=1.5)
-            c.Diff_kwargs.update(cond='image')
+            c.Diff_kwargs.update(cond='image', use_lgm=True)
             c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ObjaverseZero123Data', path=opts.root_dir)
         c.Diff_kwargs.init_t = opts.init_t
         c.Diff_kwargs.dtype = opts.dtype

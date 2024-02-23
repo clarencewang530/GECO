@@ -144,7 +144,7 @@ class Inferrer:
                 with torch.no_grad():
                     out = predict_x0(self.pipe.unet, torch.randn([1, 4, 120, 80], dtype=text_embeddings.dtype, device=self.device), text_embeddings, t=800, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
                     out = (decode_latents(out, self.pipe.vae, True)[0] + 1)*127.5 # (-1, 1) -> (0, 255)
-                mv_image = Image.fromarray(out.permute(1, 2, 0).detach().clip(0, 255).cpu().numpy().astype(np.uint8))
+                mv_image = Image.fromarray(out.float().permute(1, 2, 0).detach().clip(0, 255).cpu().numpy().astype(np.uint8))
             mv_image = np.array(mv_image.resize((512, 768))) # TODO: why 512x768 cannot work directly
             mv_image = einops.rearrange(mv_image, '(h2 h) (w2 w) c -> (h2 w2) h w c', h2=3, w2=2).astype(np.uint8) # [6, 256, 256, 3]
             mv_image = mv_image.astype(np.float32) / 255.0
@@ -183,6 +183,7 @@ class Inferrer:
         cam_poses = torch.from_numpy(np.stack(cams, axis=0))
 
         mv_image = self.generate_mv_image(cond)
+        kiui.write_image(os.path.join(out_dir, 'mv_image.png'), mv_image.transpose(1, 0, 2, 3).reshape(-1, mv_image.shape[1]*mv_image.shape[0], 3))
         input_image = torch.from_numpy(mv_image).permute(0, 3, 1, 2).float().to(self.device) # [4, 3, 256, 256]
         input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
         if opt.model_type == 'LGM':
@@ -195,7 +196,7 @@ class Inferrer:
             input_image = torch.cat([input_image, rays_embeddings], dim=1).unsqueeze(0) # [1, 4, 9, H, W]
         
         with torch.no_grad():
-            with torch.autocast(device_type='cuda', dtype=torch.float16):    
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):    
                 gaussians = self.model.forward_gaussians(input_image) if self.opt.model_type == 'LGM' else model.forward_gaussians(input_image.unsqueeze(0), cond.astype(np.uint8))
                 print('all time', time.time() - t1)
                 ## saving gaussians and video
@@ -218,4 +219,4 @@ if __name__ == "__main__":
         mask = cond[..., 3:4] / 255
         cond_input = cond[..., :3] * mask + (1 - mask) * 255
         cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
-        inferer.infer(cond, f'{opt.workspace}/{key}/2.5w-cond200/')
+        inferer.infer(cond, f'{opt.workspace}/{key}/2.5w-cond200-bf16/')
