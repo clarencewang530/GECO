@@ -138,6 +138,10 @@ def parse_int_list(s):
 @click.option('--prompt_path', metavar='PATH', type=str, required=False, default=None)
 @click.option('--init_t', metavar='INT', type=click.IntRange(min=1.0), required=True, default=999)
 @click.option('--dtype', metavar='str', type=str, required=False, default='fp32')
+@click.option('--use_lgm', metavar='BOOL', type=bool, required=True, default=False)
+@click.option('--use_reg', metavar='BOOL', type=bool, default=False)
+@click.option('--use_vsd', metavar='BOOL', type=bool, default=True)
+@click.option('--reg_data_path', metavar='str', type=str, required=False, default=None)
 
 def main(**kwargs):
     # Initialize config.
@@ -174,7 +178,7 @@ def main(**kwargs):
     # Diffusion Network architecture.
     if opts.arch.startswith('unet'):
         # prompts = json.load(open('prompt_lib.json'))['dreamfusion'][:opts.num_prompt]
-        c.Diff_kwargs.update(model_path = opts.model_path, cfg_stu=opts.cfg_stu, cfg_tchr=opts.cfg_tchr, ft_all=opts.ft_all, latent=True, cond='t2i', custom_pipeline=opts.custom_pipeline)
+        c.Diff_kwargs.update(model_path = opts.model_path, cfg_stu=opts.cfg_stu, cfg_tchr=opts.cfg_tchr, ft_all=opts.ft_all, latent=True, cond='t2i', custom_pipeline=opts.custom_pipeline, use_vsd=opts.use_vsd)
         if opts.arch == 'unet_sd':
             c.update(num_channels=4, resolution=64)
             c.Diff_kwargs.update(prompt_path=opts.prompt_path)
@@ -183,8 +187,8 @@ def main(**kwargs):
             c.Diff_kwargs.update(latent=False)
         elif opts.arch == 'unet_zero123plus' or opts.arch == 'unet_zero123':
             c.update(num_channels=4, ratio=1.5)
-            c.Diff_kwargs.update(cond='image', use_lgm=True)
-            c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ObjaverseZero123Data', path=opts.root_dir)
+            c.Diff_kwargs.update(cond='image', use_lgm=opts.use_lgm, use_reg=opts.use_reg, reg_data_path=opts.reg_data_path)
+            c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ObjaverseSingleViewData', path=opts.root_dir)
         c.Diff_kwargs.init_t = opts.init_t
         c.Diff_kwargs.dtype = opts.dtype
  
