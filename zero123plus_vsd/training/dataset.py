@@ -69,3 +69,28 @@ class ObjaverseZero123Data(Dataset):
         return {
             'img': img
         }
+
+class NoiseImagePairDataset(Dataset):
+    def __init__(self, path):
+        self.path = path
+        self.all_img_path = sorted(glob.glob(os.path.join(self.path, '*', '6view.png')))
+        self.all_cond_path = sorted(glob.glob(os.path.join(self.path, '*', 'cond.png')))
+        self.all_noise_path = sorted(glob.glob(os.path.join(self.path, '*', '6view-z.npy')))
+        self.all_latent_path = sorted(glob.glob(os.path.join(self.path, '*', '6view-latents.npy')))
+    
+    def __len__(self):
+        return len(self.all_img_path)
+
+    def __getitem__(self, idx):
+        z = torch.from_numpy(np.load(self.all_noise_path[idx])).squeeze().float()
+        latent = torch.from_numpy(np.load(self.all_latent_path[idx])).squeeze().float()
+        image = Image.open(self.all_img_path[idx])
+        image = T.ToTensor()(image) * 2.0 - 1.0
+        cond = np.array(Image.open(self.all_cond_path[idx]))
+
+        return {
+            'cond': cond,
+            'image': image,
+            'latent': latent,
+            'z': z
+        }

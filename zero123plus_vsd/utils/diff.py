@@ -148,7 +148,7 @@ def get_alpha(scheduler, t, device):
 def predict_x0(unet, noisy_latents, text_embeddings, t, guidance_scale=1.0, cross_attention_kwargs={}, scheduler=None, lora_v=False, model='sd'):
     alpha_t, sigma_t = get_alpha(scheduler, t, noisy_latents.device)
     noise_pred = predict_noise0_diffuser(unet, noisy_latents * sigma_t, text_embeddings, t=t, guidance_scale=guidance_scale, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=model)
-    return (noisy_latents - noise_pred) * sigma_t/ alpha_t
+    return (noisy_latents - sigma_t * noise_pred) / alpha_t
 
 def predict_x0_ldm(unet, noisy_latents, t, scheduler, labels=None, encoder_hidden_states=None):
     if unet.__class__.__name__ in ['SongUNet', 'DhariwalUNet']:

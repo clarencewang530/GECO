@@ -15,24 +15,20 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import sys
 
-from transformers import CLIPTextModel, CLIPTokenizer
-from transformers import logging as transformers_logging
-transformers_logging.set_verbosity_error()  # disable warning
-
-from diffusers import DDIMScheduler, DDPMScheduler
-from diffusers import DiffusionPipeline
+from diffusers import DDIMScheduler, DDPMScheduler, DiffusionPipeline
 
 from utils.diff import extract_lora_diffusers, predict_noise0_diffuser, predict_x0, predict_x0_ldm
 from utils.saving import *
 from training.lgm_loader import LGMLoader, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import einops
+from piq import LPIPS
+from training.dataset import NoiseImagePairDataset
 
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from kiui.cam import orbit_camera
 import kiui
 
-@torch.no_grad()
 def decode_latents(latents, vae, is_zero123plus):
     if is_zero123plus:
         latents = unscale_latents(latents)
@@ -43,7 +39,6 @@ def decode_latents(latents, vae, is_zero123plus):
         image = vae.decode(latents, return_dict=False)[0]
     return image
 
-@torch.no_grad()
 def encode_image(image, vae, is_zero123plus=True):
     if is_zero123plus:
         image = scale_image(image)
@@ -131,11 +126,10 @@ def training_loop(
             cond = to_rgb_image(Image.open('./data/lysol.png'))
             text_embeddings, cross_attention_kwargs = pipe.prepare_conditions(cond, guidance_scale=Diff_kwargs.cfg_tchr)
             batch_val = max(2, batch_gpu) # at least two different latents
-            text_embeddings = torch.cat([text_embeddings[:1].repeat(batch_val, 1, 1), text_embeddings[1:2].repeat(batch_val, 1, 1)])
-            text_embeddings_vis = text_embeddings.clone()
+            text_embeddings_vis = torch.cat([text_embeddings[:1].repeat(batch_val, 1, 1), text_embeddings[1:2].repeat(batch_val, 1, 1)])
             cond_lat = cross_attention_kwargs['cond_lat']
             # empty image and condition image
-            cond_lat = torch.cat([cond_lat[:1].repeat(batch_val, 1, 1, 1), cond_lat[1:2].repeat(batch_val, 1, 1, 1)])
+            cond_lat = cond_lat if gen_type == 'sin' else torch.cat([cond_lat[:1].repeat(batch_val, 1, 1, 1), cond_lat[1:2].repeat(batch_val, 1, 1, 1)])
             cross_attention_kwargs_vis = {'cond_lat': cond_lat}
             cross_attention_kwargs_stu = cross_attention_kwargs_vis
         pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
@@ -164,6 +158,12 @@ def training_loop(
         rays_embeddings = lgm.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(batch_gpu, 1, 1, 1, 1)
         cam_view, cam_view_proj, cam_pos = lgm_loader.get_cam_poses(elevations, azimuths, batch_gpu)
         bg_color = torch.ones(3, dtype=dtype, device=device) * 0.5
+    
+    if Diff_kwargs.use_reg:
+        nip_dataset = NoiseImagePairDataset(Diff_kwargs.reg_data_path)
+        nip_sampler = misc.InfiniteSampler(dataset=nip_dataset, rank=rank, num_replicas=num_gpus, seed=random_seed)
+        nip_iterator = iter(torch.utils.data.DataLoader(dataset=nip_dataset, sampler=nip_sampler, batch_size=1))
+        loss_fn_lpips = LPIPS(replace_pooling=True, reduction='none').to(device)
 
     if gen_type == 'sin':
         all_images = torch.nn.Parameter(torch.rand(1, 4, int(ratio*resolution), resolution, device=device))
@@ -249,102 +249,97 @@ def training_loop(
 
         G_opt.zero_grad(set_to_none=True)
         Diff_opt.zero_grad(set_to_none=True)
-        labels = torch.eye(Diff.label_dim, device=device)[torch.randint(Diff.label_dim, size=[batch_gpu], device=device)] if label_dim > 0 else None
 
-        if gen_type == 'sin':
-            if loss_type == 'sds':
-                particles = all_images
-            else:
-                particles = all_images[torch.randint(0, n_images, [batch_size])]
-        else:
-            z = torch.randn([batch_gpu, num_channels, int(ratio*resolution), resolution], device=device, dtype=dtype)
-            G.train()
-            data = next(dataset_iterator)
-            if arch == 'unet_zero123plus':
-                text_embeddings, cross_attention_kwargs = pipe.prepare_conditions(data['img'], guidance_scale=Diff_kwargs.cfg_tchr)
-                # empty image and condition image
-                cross_attention_kwargs_stu = cross_attention_kwargs
-            else:
-                prompts = data
-                with torch.no_grad():
-                    text_embeds, negative_embeds = pipe.encode_prompt(prompts, num_images_per_prompt=1, device=device, do_classifier_free_guidance=True)
-                    text_embeddings = torch.cat([negative_embeds, text_embeds])
-                indices = torch.randperm(text_embeds.shape[0])[:batch_gpu]
-                text_embeddings = torch.cat([negative_embeds[indices], text_embeds[indices]])
-            particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
-            if Diff_kwargs.use_lgm:
-                particles = decode_latents(particles, vae, arch == 'unet_zero123plus').clamp(-1, 1) # (-1, 1)
-                particles = (particles + 1) / 2
-                particles = einops.rearrange(particles, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
-                input_image = F.interpolate(particles, size=(opt.input_size, opt.input_size), mode='bilinear', align_corners=False)
-                input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(batch_gpu, 6, 3, opt.input_size, opt.input_size) # [1, 4, 3, 256, 256]
-                input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
-                gaussians = lgm.forward_gaussians(input_image)
-                image = lgm.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
-                image = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
-                particles = encode_image(image, vae, arch == 'unet_zero123plus')
-            
-
-        # Execute training loop.
-        # (1) Train Generator
-        with torch.no_grad():
-            y, augment_labels = particles, None
-            
-            t = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999).long()
-            n = torch.randn_like(y) 
-            y_noisy = scheduler.add_noise(y, n, t)
-            if arch == 'unet_zero123':
-                n_pred = pipe.forward_unet(Diff_pre, image_latents, image_camera_embeddings, Diff_kwargs.cfg_tchr, y_noisy, t, encoder_hidden_states=image_camera_embeddings)
-            else:
-                n_pred = predict_noise0_diffuser(Diff_pre, y_noisy, text_embeddings, t, guidance_scale=Diff_kwargs.cfg_tchr, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
-            if loss_type == 'vsd':
-                if arch == 'unet_zero123':
-                    n_est = pipe.forward_unet(Diff, image_latents, image_camera_embeddings, Diff_kwargs.cfg_stu, y_noisy, t, encoder_hidden_states=image_camera_embeddings, cross_attention_kwargs=cross_attention_kwargs_stu)
+        loss_vsd = 0.0
+        if Diff_kwargs.use_vsd:
+            if gen_type == 'sin':
+                if loss_type == 'sds':
+                    particles = all_images
                 else:
-                    n_est = predict_noise0_diffuser(Diff, y_noisy, text_embeddings, t, guidance_scale=Diff_kwargs.cfg_stu, cross_attention_kwargs=cross_attention_kwargs_stu, scheduler=scheduler, model=arch)
-                grad = n_pred - n_est
+                    particles = all_images[torch.randint(0, n_images, [batch_size])]
             else:
-                grad = n_pred - n
+                z = torch.randn([batch_gpu, num_channels, int(ratio*resolution), resolution], device=device, dtype=dtype)
+                G.train()
+                data = next(dataset_iterator)
+                if arch == 'unet_zero123plus':
+                    text_embeddings, cross_attention_kwargs = pipe.prepare_conditions(data['img'], guidance_scale=Diff_kwargs.cfg_tchr)
+                    # empty image and condition image
+                    cross_attention_kwargs_stu = cross_attention_kwargs
+                particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
+            if Diff_kwargs.use_lgm:
+                with torch.no_grad():
+                    mv_image = decode_latents(particles, vae, arch == 'unet_zero123plus').clamp(-1, 1) # (-1, 1)
+                    input_image = einops.rearrange((mv_image + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
+                    input_image = F.interpolate(input_image, size=(opt.input_size, opt.input_size), mode='bilinear', align_corners=False)
+                    input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(batch_gpu, 6, 3, opt.input_size, opt.input_size) # [1, 4, 3, 256, 256]
+                    input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
+                    gaussians = lgm.forward_gaussians(input_image)
+                    image = lgm.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
+                    lgm_image = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
+                    lgm_latents = encode_image(lgm_image, vae, arch == 'unet_zero123plus')
 
-            grad = torch.nan_to_num(grad)
-        # reparameterization trick
-        # d(loss)/d(latents) = latents - target = latents - (latents - grad) = grad
-        target = (particles - grad).detach()
-        loss_vsd = 0.5 * F.mse_loss(particles, target, reduction="sum") / particles.shape[0]
+            # Execute training loop.
+            # (1) Train Generator
+            with torch.no_grad():
+                y = particles if not Diff_kwargs.use_lgm else lgm_latents
+                
+                t = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999).long()
+                n = torch.randn_like(y)    
+                y_noisy = scheduler.add_noise(y, n, t)
+                if arch == 'unet_zero123':
+                    n_pred = pipe.forward_unet(Diff_pre, image_latents, image_camera_embeddings, Diff_kwargs.cfg_tchr, y_noisy, t, encoder_hidden_states=image_camera_embeddings)
+                else:
+                    n_pred = predict_noise0_diffuser(Diff_pre, y_noisy, text_embeddings, t, guidance_scale=Diff_kwargs.cfg_tchr, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
+                if loss_type == 'vsd':
+                    if arch == 'unet_zero123':
+                        n_est = pipe.forward_unet(Diff, image_latents, image_camera_embeddings, Diff_kwargs.cfg_stu, y_noisy, t, encoder_hidden_states=image_camera_embeddings, cross_attention_kwargs=cross_attention_kwargs_stu)
+                    else:
+                        n_est = predict_noise0_diffuser(Diff, y_noisy, text_embeddings, t, guidance_scale=Diff_kwargs.cfg_stu, cross_attention_kwargs=cross_attention_kwargs_stu, scheduler=scheduler, model=arch)
+                    grad = n_pred - n_est
+                else:
+                    grad = n_pred - n
+
+                grad = torch.nan_to_num(grad)
+            # reparameterization trick
+            # d(loss)/d(latents) = latents - target = latents - (latents - grad) = grad
+            target = (particles - grad).detach()
+            loss_vsd = 0.5 * F.mse_loss(particles, target, reduction="sum") / particles.shape[0]
+
+        if Diff_kwargs.use_reg:
+            loss_reg = 0.0
+            reg_data = next(nip_iterator)
+            with torch.no_grad():
+                text_embeddings_reg, cross_attention_kwargs_reg = pipe.prepare_conditions(reg_data['cond'], guidance_scale=Diff_kwargs.cfg_tchr)
+            pred_latents = predict_x0(G, reg_data['z'].to(device), text_embeddings_reg, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=scheduler, model=arch)
+            pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus')
+            loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
+            loss_reg += 0.5 * F.mse_loss(pred_images, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
+            # loss_reg += 0.5 * F.mse_loss(pred_latents, reg_data['latent'].to(device), reduction="sum") / pred_latents.shape[0]
+            loss_vsd += loss_reg
 
         loss_vsd.backward()
         G_params_post = [param for param in (G.parameters() if gen_type != 'sin' else [all_images]) if param.numel() > 0 and param.grad is not None]
         optimizer_step(G_params_post, G_opt)
         
-        # # (2) Train Diffusion
-        if loss_type == 'sds':
-            loss_diff = 0.0
-        else:
-            particles = particles.clone().detach() # detach from generator graph
-            n_phi = torch.randn_like(particles)
-            t_phi = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999)
-            t_phi = t_phi if arch == 'unet_edm' else t_phi.long()
-            x_noisy = scheduler.add_noise(particles, n_phi, t_phi).detach()
-            if arch == 'unet_zero123':
-                n_phi_pred = pipe.forward_unet(Diff, image_latents, image_camera_embeddings.clone().detach(), Diff_kwargs.cfg_stu, x_noisy, t_phi, cross_attention_kwargs=cross_attention_kwargs_stu)  
+        if Diff_kwargs.use_vsd:
+            # # (2) Train Diffusion
+            if loss_type == 'sds':
+                loss_diff = 0.0
             else:
-                n_phi_pred = predict_noise0_diffuser(Diff, x_noisy, text_embeddings, t_phi, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_stu, scheduler=scheduler, model=arch)
-            loss_diff = torch.nn.functional.mse_loss(n_phi_pred, n_phi)
-            loss_diff.sum().mul(1/batch_gpu).backward()
+                x_stu = particles.clone().detach() if not Diff_kwargs.use_lgm else lgm_latents.clone().detach()
+                n_phi = torch.randn_like(x_stu)
+                t_phi = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999)
+                t_phi = t_phi if arch == 'unet_edm' else t_phi.long()
+                x_noisy = scheduler.add_noise(x_stu, n_phi, t_phi).detach()
+                if arch == 'unet_zero123':
+                    n_phi_pred = pipe.forward_unet(Diff, image_latents, image_camera_embeddings.clone().detach(), Diff_kwargs.cfg_stu, x_noisy, t_phi, cross_attention_kwargs=cross_attention_kwargs_stu)  
+                else:
+                    n_phi_pred = predict_noise0_diffuser(Diff, x_noisy, text_embeddings, t_phi, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_stu, scheduler=scheduler, model=arch)
+                loss_diff = torch.nn.functional.mse_loss(n_phi_pred, n_phi)
+                loss_diff.sum().mul(1/batch_gpu).backward()
 
-        Diff_params_post = [param for param in (Diff_lora.parameters() if not Diff_kwargs.ft_all else Diff.parameters()) if param.numel() > 0 and param.grad is not None]
-        optimizer_step(Diff_params_post, Diff_opt)
-        # for (params, opt) in [(G_params_post, G_opt), (Diff_params_post, Diff_opt)]:
-        #     if len(params) > 0:
-        #         flat = torch.cat([param.grad.flatten() for param in params])
-        #         if num_gpus > 1:
-        #             torch.distributed.all_reduce(flat)
-        #             flat /= num_gpus
-        #         misc.nan_to_num(flat, nan=0, posinf=1e5, neginf=-1e5, out=flat)
-        #         grads = flat.split([param.numel() for param in params])
-        #         for param, grad in zip(params, grads):
-        #             param.grad = grad.reshape(param.shape)
-        #     opt.step()
+            Diff_params_post = [param for param in (Diff_lora.parameters() if not Diff_kwargs.ft_all else Diff.parameters()) if param.numel() > 0 and param.grad is not None]
+            optimizer_step(Diff_params_post, Diff_opt)
 
         # Update state.
         cur_nimg += batch_size
@@ -362,12 +357,13 @@ def training_loop(
         training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time)
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
-        training_stats.report0('Loss/vsd', loss_vsd)
-        training_stats.report0('Loss/diff', loss_diff)
-        training_stats.report0('lr/Diff', Diff_opt.param_groups[0]['lr'])
+        if Diff_kwargs.use_vsd:
+            training_stats.report0('Loss/vsd', loss_vsd)
+            training_stats.report0('Loss/diff', loss_diff)
+            training_stats.report0('lr/Diff', Diff_opt.param_groups[0]['lr'])
         training_stats.report0('lr/G', G_opt.param_groups[0]['lr'])
-        # if rank == 0:
-        #     print(' '.join(fields))
+        if Diff_kwargs.use_reg:
+            training_stats.report0('Loss/reg', loss_reg)
 
         # Check for abort.
         if (not done) and (abort_fn is not None) and abort_fn():
@@ -381,24 +377,28 @@ def training_loop(
                     images = all_images.clone().detach()
                     save_image_grid(images.clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}.png'), drange=[-1, 1], grid_size=(n_images, 1))
                     if Diff_kwargs.latent:
-                        img = unscale_latents(images)
-                        img = vae.decode(images[:4]/vae.config.scaling_factor).sample
-                        img = unscale_image(img)
+                        img = decode_latents(images, vae, arch=='unet_zero123plus')
                         save_image_grid(img.detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-img.png'), drange=[-1, 1], grid_size=(n_images, 1))
+                    if Diff_kwargs.use_lgm:
+                        save_image_grid(lgm_image.detach().clamp(0, 1).cpu().numpy(), os.path.join(run_dir, f'{cur_tick:06d}-lgm.png'), drange=[0, 1], grid_size=(n_images, 1))
                 elif arch.startswith('unet'):
                     G.eval()
-                    out = predict_x0(G, grid_z, text_embeddings_vis, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_vis, scheduler=scheduler, model=arch) if Diff_kwargs.cond != None else predict_x0_ldm(G, grid_z, t=Diff_kwargs.init_t, scheduler=scheduler, labels=grid_labels)
+                    out = predict_x0(G, grid_z, text_embeddings_vis, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_vis, scheduler=scheduler, model=arch)
                     if arch.startswith('unet') and Diff_kwargs.latent:
                         img = decode_latents(out, vae, arch=='unet_zero123plus')
                         save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-img.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
                         out /= vae.config.scaling_factor
                     save_image_grid(out.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
 
-                    out = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch) if Diff_kwargs.cond != None else predict_x0_ldm(G, z, t=Diff_kwargs.init_t, scheduler=scheduler, labels=labels)
-                    if Diff_kwargs.latent:
-                        img = decode_latents(out, vae, arch=='unet_zero123plus')
-                    save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-rand.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
-                    save_image_grid(data['img'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(out.shape[0], 8))
+                    if Diff_kwargs.use_vsd:
+                        out = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
+                        if Diff_kwargs.latent:
+                            img = decode_latents(out, vae, arch=='unet_zero123plus')
+                        save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-rand.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
+                        save_image_grid(data['img'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(out.shape[0], 8))
+            if Diff_kwargs.use_reg:
+                out = torch.cat((reg_data['image'].clone().detach().cpu(), pred_images.clone().detach().cpu()), dim=0)
+                save_image_grid(out.clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, out.shape[0]), max( (out.shape[0]+1) // 8, 1)))
         torch.cuda.empty_cache()
 
         # Save network snapshot.
