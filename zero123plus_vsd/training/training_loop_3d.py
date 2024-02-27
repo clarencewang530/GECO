@@ -191,13 +191,15 @@ def training_loop(
         resume_data = pickle.load(open(resume_pkl, 'rb'))
         for name, module in [('Diff', Diff), ('G', G)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+        del resume_data
 
-        print(f'Loading training state from "{resume_state_dump}"...')
-        data = torch.load(resume_state_dump, map_location=torch.device('cpu'))
-        G_opt.load_state_dict(data['G_opt_state'])
-        Diff_opt.load_state_dict(data['Diff_opt_state'])
-        cur_tick = data['cur_tick']
-        del data # conserve memory
+        cur_tick = 5000
+        # print(f'Loading training state from "{resume_state_dump}"...')
+        # data = torch.load(resume_state_dump, map_location=torch.device('cpu'))
+        # G_opt.load_state_dict(data['G_opt_state'])
+        # Diff_opt.load_state_dict(data['Diff_opt_state'])
+        # cur_tick = data['cur_tick']
+        # del data # conserve memory
 
     # Distribute across GPUs.
     dist.print0(f'Distributing across {num_gpus} GPUs...')
@@ -268,15 +270,7 @@ def training_loop(
                 particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
             if Diff_kwargs.use_lgm:
                 with torch.no_grad():
-                    mv_image = decode_latents(particles, vae, arch == 'unet_zero123plus').clamp(-1, 1) # (-1, 1)
-                    input_image = einops.rearrange((mv_image + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
-                    input_image = F.interpolate(input_image, size=(opt.input_size, opt.input_size), mode='bilinear', align_corners=False)
-                    input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(batch_gpu, 6, 3, opt.input_size, opt.input_size) # [1, 4, 3, 256, 256]
-                    input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
-                    gaussians = lgm.forward_gaussians(input_image)
-                    image = lgm.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
-                    lgm_image = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
-                    lgm_latents = encode_image(lgm_image, vae, arch == 'unet_zero123plus')
+                    lgm_latents = lgm_loader.process_from_zero123plus(particles, rays_embeddings, cam_view, cam_view_proj, cam_pos)
 
             # Execute training loop.
             # (1) Train Generator
@@ -312,9 +306,13 @@ def training_loop(
                 text_embeddings_reg, cross_attention_kwargs_reg = pipe.prepare_conditions(reg_data['cond'], guidance_scale=Diff_kwargs.cfg_tchr)
             pred_latents = predict_x0(G, reg_data['z'].to(device), text_embeddings_reg, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=scheduler, model=arch)
             pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus')
-            loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
-            loss_reg += 0.5 * F.mse_loss(pred_images, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
-            # loss_reg += 0.5 * F.mse_loss(pred_latents, reg_data['latent'].to(device), reduction="sum") / pred_latents.shape[0]
+            if Diff_kwargs.use_lgm:
+                pred_images_lgm = lgm_loader.process_from_zero123plus(pred_images, rays_embeddings, cam_view, cam_view_proj, cam_pos)
+                loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images_lgm.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
+                loss_reg += 0.5 * F.mse_loss(pred_images_lgm, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
+            else:
+                loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
+                loss_reg += 0.5 * F.mse_loss(pred_images, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
             loss_vsd += loss_reg
 
         loss_vsd.backward()
@@ -398,6 +396,8 @@ def training_loop(
                         save_image_grid(data['img'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(out.shape[0], 8))
             if Diff_kwargs.use_reg:
                 out = torch.cat((reg_data['image'].clone().detach().cpu(), pred_images.clone().detach().cpu()), dim=0)
+                if Diff_kwargs.use_lgm:
+                    out = torch.cat((out, pred_images_lgm.clone().detach().cpu()), dim=0)
                 save_image_grid(out.clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, out.shape[0]), max( (out.shape[0]+1) // 8, 1)))
         torch.cuda.empty_cache()
 
