@@ -28,9 +28,19 @@ import einops
 import pickle
 import time
 import json
+import random
 
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def params_and_buffers(module):
     assert isinstance(module, torch.nn.Module)
@@ -117,11 +127,14 @@ class Inferrer:
             if opt.pipeline == 'zero123plus1step':
                 pipe.prepare()
                 pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-                # resume_pkl = '/home/chenwang/logs-bak/instant123/20240203/training-runs/zero123plus/zero123plus-gpus2-batch2-same-vsd-20240116-224428-new/network-snapshot-005000.pkl'
-                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-000500.pkl'
+                resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060250-cond0/network-snapshot-005000.pkl"
                 # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-064415-cond500/network-snapshot-005000.pkl'
-                # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-010000.pkl'
-                resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-030000.pkl'
+                # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-005000.pkl'
+                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060250-cond0/network-snapshot-015000.pkl'
+
+                # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-030000.pkl'
+                resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240223-222021-cond0_t950/network-snapshot-020000.pkl'
+                # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240224-060403-cond500_t950/network-snapshot-020000.pkl"
                 resume_data = pickle.load(open(resume_pkl, 'rb'))
                 copy_params_and_buffers(resume_data['G'], pipe.unet, require_all=False)
                 pipe.unet.eval()
@@ -142,7 +155,7 @@ class Inferrer:
                 cross_attention_kwargs_stu = cross_attention_kwargs
                 print(f'preparing time: {time.time() - t1:.2f}s')
                 with torch.no_grad():
-                    out = predict_x0(self.pipe.unet, torch.randn([1, 4, 120, 80], dtype=text_embeddings.dtype, device=self.device), text_embeddings, t=800, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
+                    out = predict_x0(self.pipe.unet, torch.randn([1, 4, 120, 80], dtype=text_embeddings.dtype, device=self.device), text_embeddings, t=self.opt.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
                     out = (decode_latents(out, self.pipe.vae, True)[0] + 1)*127.5 # (-1, 1) -> (0, 255)
                 mv_image = Image.fromarray(out.float().permute(1, 2, 0).detach().clip(0, 255).cpu().numpy().astype(np.uint8))
             mv_image = np.array(mv_image.resize((512, 768))) # TODO: why 512x768 cannot work directly
@@ -201,14 +214,19 @@ class Inferrer:
                 print('all time', time.time() - t1)
                 ## saving gaussians and video
                 self.model.gs.save_ply(gaussians, os.path.join(out_dir, 'output.ply'))
-                images = self.render_video(np.arange(0, 360, 2, dtype=np.int32) * 0, np.arange(0, 360, 2, dtype=np.int32), gaussians)
+                images = self.render_video(np.arange(0, 16, dtype=np.int32) * 0, np.rad2deg(np.arange(16)/16*2*np.pi), gaussians)
+                for (i, img) in enumerate(images):
+                    kiui.write_image(f'{out_dir}/{i:03d}.png', img)
                 imageio.mimwrite(os.path.join(out_dir, 'output.mp4'), images, fps=30)
 
 if __name__ == "__main__":
     opt = tyro.cli(AllConfigs)
     inferer = Inferrer(opt)
 
-    file_paths = json.load(open(opt.test_path, 'r'))
+    seed_everything(42)
+    # file_paths = json.load(open(opt.test_path, 'r'))
+    paths = sorted(os.listdir('/mnt/kostas-graid/sw/envs/chenwang/data/gso/gso_recon_gsec512'))
+    file_paths = {f: f'/mnt/kostas-graid/sw/envs/chenwang/data/gso/gso_eval_gsec/{f}/000.png' for f in paths}
     ## testing
     for key in file_paths.keys():
         print(key)
@@ -219,4 +237,6 @@ if __name__ == "__main__":
         mask = cond[..., 3:4] / 255
         cond_input = cond[..., :3] * mask + (1 - mask) * 255
         cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
-        inferer.infer(cond, f'{opt.workspace}/{key}/2.5w-cond200-bf16/')
+        # inferer.infer(cond, f'{opt.workspace}/gso_results/{key}/5k-cond{opt.cond_t}-t{opt.init_t}-bf16-{seed}/')
+        # inferer.infer(cond, f'/mnt/kostas-graid/sw/envs/chenwang/workspace/gsec_compare/gsec512-500-950-15k-second-stage/{key}')
+        inferer.infer(cond, f'./workspace/cond950_0_20k/{key}')

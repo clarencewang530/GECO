@@ -77,6 +77,8 @@ class Options:
     pipeline: str = 'zero123plus1step'
     generate_mv: bool = False
     include_input: bool = False
+    cond_t: int = 0
+    init_t: int = 800
 
     ### misc
     # nvdiffrast backend setting
