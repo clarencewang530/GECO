@@ -94,9 +94,12 @@ def generate(opt):
     elevations, azimuths = [-30, 20, -30, 20, -30, 20], [30, 90, 150, 210, 270, 330]
     rays_embeddings = inferrer.model.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(bs, 1, 1, 1, 1)
 
-    elevations = np.random.randint(-90, 90, size=bs*nv)
-    azimuths = np.random.randint(0, 360, size=bs*nv)
-    cam_view, cam_view_proj, cam_pos = inferrer.get_cam_poses(elevations, azimuths, bs, nv)
+    ele_render = np.random.randint(-90, 90, size=bs*nv)
+    azi_render = np.random.randint(0, 360, size=bs*nv)
+    for i in range(bs):
+        ele_render[i*nv:i*nv+6] = elevations
+        azi_render[i*nv:i*nv+6] = azimuths
+    cam_view, cam_view_proj, cam_pos = inferrer.get_cam_poses(ele_render, azi_render, bs, nv)
 
     # B = zero123out.shape[0]
     with torch.no_grad():
@@ -157,7 +160,7 @@ def generate(opt):
                         np.save(os.path.join(output_path, f'{data["path"][i]}/z.npy'), latents_init[i].cpu().numpy())
                         np.save(os.path.join(output_path, f'{data["path"][i]}/latents_out.npy'), latents_out[i].cpu().numpy())
                         result[i].save(os.path.join(output_path, f'{name}/6view.png'))
-                        json.dump({'elevation': elevations[i*nv:(i+1)*nv].tolist(), 'azimuth': azimuths[i*nv:(i+1)*nv].tolist()}, open(os.path.join(output_path, name, f'cam.json'), 'w'), indent=2)
+                        json.dump({'elevation': ele_render[i*nv:(i+1)*nv].tolist(), 'azimuth': azi_render[i*nv:(i+1)*nv].tolist()}, open(os.path.join(output_path, name, f'cam.json'), 'w'), indent=2)
                         for j, img in enumerate(imgs):
                             img = Image.fromarray((img * 255).astype(np.uint8))
                             Image.fromarray((mask[i,j] * 255).astype(np.uint8).squeeze()).save(os.path.join(output_path, name, f'{j:03d}-mask.png'))
