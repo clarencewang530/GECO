@@ -40,9 +40,9 @@ def encode_image(image, vae, is_zero123plus=True):
 def decode_latents(latents, decoder, is_zero123plus=True):
     if is_zero123plus:
         latents = unscale_latents(latents)
-        latents = latents / decoder.vae.config.scaling_factor
-        # image = decoder.decode(latents, return_dict=False)[0]
-        image = decoder(latents)
+        latents = latents / decoder.config.scaling_factor
+        image = decoder.decode(latents, return_dict=False)[0]
+        # image = decoder(latents)
         image = unscale_image(image)
     else:
         image = decoder.decode(latents, return_dict=False)[0]

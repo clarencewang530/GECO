@@ -71,7 +71,7 @@ def default_rays_from_pose(device, cam_poses, opt):
     return rays_embeddings
 
 class Inferrer:
-    def __init__(self, opt):
+    def __init__(self, opt, device='cuda'):
         self.opt = opt
         # model
         if opt.model_type == 'Zero123PlusGaussian':
@@ -91,7 +91,7 @@ class Inferrer:
             print(f'[WARN] model randomly initialized, are you sure?')
 
         # device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(device)
         self.model.half().to(self.device)
         self.model.eval()
 
@@ -119,22 +119,23 @@ class Inferrer:
             pipe = DiffusionPipeline.from_pretrained(
                 "sudo-ai/zero123plus-v1.1",
                 custom_pipeline="./pipelines/zero123plus.py",
-                dtype=torch.float16,
+                torch_dtype=torch.float16,
             ).to(self.device)
             pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
                 pipe.scheduler.config, timestep_spacing='trailing'
             )
-            if opt.pipeline == 'zero123plus1step':
+            if pipeline == 'zero123plus1step':
                 pipe.prepare()
                 pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-                resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060250-cond0/network-snapshot-005000.pkl"
-                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-064415-cond500/network-snapshot-005000.pkl'
+                # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060250-cond0/network-snapshot-005000.pkl"
+                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-064415-cond500/network-snapshot-020000.pkl'
                 # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-005000.pkl'
                 # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060250-cond0/network-snapshot-015000.pkl'
 
                 # resume_pkl='/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240221-060105-cond200/network-snapshot-030000.pkl'
-                resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240223-222021-cond0_t950/network-snapshot-020000.pkl'
-                # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240224-060403-cond500_t950/network-snapshot-020000.pkl"
+                # resume_pkl = '/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240223-222021-cond0_t950/network-snapshot-020000.pkl'
+                # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240224-060403-cond500_t950/network-snapshot-005000.pkl"
+                resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs1/zero123plus-lvis/zero123plus-gpus1-batch1-same-vsd-20240301-192604-cond0_t950_lvis/network-snapshot-005000.pkl"
                 resume_data = pickle.load(open(resume_pkl, 'rb'))
                 copy_params_and_buffers(resume_data['G'], pipe.unet, require_all=False)
                 pipe.unet.eval()
@@ -149,7 +150,7 @@ class Inferrer:
             mv_image = np.stack([mv_image[1], mv_image[2], mv_image[3], mv_image[0]], axis=0) # [4, 256, 256, 3], float32, (0, 1)
         elif self.opt.pipeline.startswith('zero123plus'):
             if self.opt.pipeline == 'zero123plus':
-                mv_image = self.pipe(Image.fromarray(image.astype(np.uint8)), num_inference_steps=1).images[0]
+                mv_image = self.pipe(Image.fromarray(image.astype(np.uint8)), num_inference_steps=75).images[0]
             else:
                 text_embeddings, cross_attention_kwargs = self.pipe.prepare_conditions(image.astype(np.uint8), guidance_scale=4.0)
                 cross_attention_kwargs_stu = cross_attention_kwargs
@@ -219,6 +220,28 @@ class Inferrer:
                     kiui.write_image(f'{out_dir}/{i:03d}.png', img)
                 imageio.mimwrite(os.path.join(out_dir, 'output.mp4'), images, fps=30)
 
+    def get_cam_poses(self, elevations, azimuths, bs, nv=50):
+        cam_poses = [orbit_camera(ele, azi, radius=self.opt.cam_radius, opengl=True) for (ele, azi) in zip(elevations, azimuths)]
+        cam_poses = torch.from_numpy(np.stack(cam_poses, axis=0)).to(self.device)
+        cam_poses[:, :3, 1:3] *= -1 # invert up & forward direction
+        
+        cam_view = torch.inverse(cam_poses).transpose(1, 2).reshape(bs, nv, 4, 4) # [B, V, 4, 4]
+        cam_view_proj = cam_view @ self.proj_matrix # [B, V, 4, 4]
+        cam_pos = - cam_poses[:, :3, 3].repeat(bs, nv, 3) # [B, V, 3]
+        return cam_view, cam_view_proj, cam_pos
+    
+    def process_from_zero123plus(self, zero123out, rays_embeddings, cam_view, cam_view_proj, cam_pos, bg_color=0.5):
+        B = zero123out.shape[0]
+        input_image = einops.rearrange((zero123out + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
+        input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
+        input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(B, 6, 3, self.opt.input_size, self.opt.input_size) # [1, 4, 3, 256, 256]
+        input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
+        gaussians = self.model.forward_gaussians(input_image)
+        bg_color = torch.ones(3, dtype=input_image.dtype, device=input_image.device) * 0.5
+        image = self.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
+        pred_images_lgm = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
+        return pred_images_lgm
+
 if __name__ == "__main__":
     opt = tyro.cli(AllConfigs)
     inferer = Inferrer(opt)
@@ -239,4 +262,4 @@ if __name__ == "__main__":
         cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
         # inferer.infer(cond, f'{opt.workspace}/gso_results/{key}/5k-cond{opt.cond_t}-t{opt.init_t}-bf16-{seed}/')
         # inferer.infer(cond, f'/mnt/kostas-graid/sw/envs/chenwang/workspace/gsec_compare/gsec512-500-950-15k-second-stage/{key}')
-        inferer.infer(cond, f'./workspace/cond950_0_20k/{key}')
+        inferer.infer(cond, f'./workspace/cond950_0_5k_lvis/{key}')

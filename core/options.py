@@ -29,6 +29,7 @@ class Options:
 
     ### dataset
     # data mode (only support s3 now)
+    data_path: str = '/mnt/kostas-graid/sw/envs/chenwang/workspace/lrm-zero123/assets/9000-9999'
     data_mode: Literal['s3'] = 's3'
     # fovy of the dataset
     fovy: float = 47.1
@@ -79,6 +80,14 @@ class Options:
     include_input: bool = False
     cond_t: int = 0
     init_t: int = 800
+
+    ## sampling
+    sample_bs: int = 6
+    sample_nv: int = 50
+    sample_data_path: str = '/mnt/kostas-graid/sw/envs/chenwang/data/lvis_first'
+    sample_output_path: str = '/mnt/kostas-graid/sw/envs/chenwang/data/lvis_sample1'
+    sample_start: int = 0
+    sample_end: int = 10000
 
     ### misc
     # nvdiffrast backend setting
