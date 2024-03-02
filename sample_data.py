@@ -146,18 +146,21 @@ def generate(opt):
                     gaussians = inferrer.model.forward_gaussians(input_image)
                     bg_color = torch.ones(3, dtype=input_image.dtype, device=input_image.device)
                     # TODO: change the poses here
-                    image = inferrer.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, 3, H, W), [0, 1]
-                    image = image.permute(0, 1, 3, 4, 2).cpu().numpy() # (B, V, 3, H, W)
+                    output = inferrer.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color) # (B, V, 3, H, W), [0, 1]
+                    image = output['image'].permute(0, 1, 3, 4, 2).cpu().numpy() # (B, V, 3, H, W)
+                    mask = output['alpha'].permute(0, 1, 3, 4, 2).cpu().numpy()
         
                     for i, imgs in enumerate(image):
                         name = data["path"][i]
                         os.makedirs(os.path.join(output_path, name), exist_ok=True)
                         Image.fromarray(data['cond'][i].cpu().numpy().astype(np.uint8)).save(os.path.join(output_path, f'{name}/cond.png'))
                         np.save(os.path.join(output_path, f'{data["path"][i]}/z.npy'), latents_init[i].cpu().numpy())
+                        np.save(os.path.join(output_path, f'{data["path"][i]}/latents_out.npy'), latents_out[i].cpu().numpy())
                         result[i].save(os.path.join(output_path, f'{name}/6view.png'))
                         json.dump({'elevation': elevations[i*nv:(i+1)*nv].tolist(), 'azimuth': azimuths[i*nv:(i+1)*nv].tolist()}, open(os.path.join(output_path, name, f'cam.json'), 'w'), indent=2)
                         for j, img in enumerate(imgs):
                             img = Image.fromarray((img * 255).astype(np.uint8))
+                            Image.fromarray((mask[i,j] * 255).astype(np.uint8).squeeze()).save(os.path.join(output_path, name, f'{j:03d}-mask.png'))
                             img.save(os.path.join(output_path, name, f'{j:03d}.png'))
                 torch.cuda.empty_cache()
 
