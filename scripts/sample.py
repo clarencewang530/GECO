@@ -1,8 +1,8 @@
 import os
 import subprocess
 
-all_files = 10
-num_gpus = 2
+all_files = 46050
+num_gpus = 8
 
 
 
