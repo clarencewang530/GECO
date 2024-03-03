@@ -101,7 +101,6 @@ def generate(opt):
         with tqdm.tqdm(loader) as pbar:
             for data in pbar:
                 ele_render = np.random.randint(-90, 90, size=bs*nv)
-                print(ele_render)
                 azi_render = np.random.randint(0, 360, size=bs*nv)
                 for i in range(bs):
                     ele_render[i*nv:i*nv+6] = elevations
