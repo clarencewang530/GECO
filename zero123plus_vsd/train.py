@@ -10,7 +10,7 @@ from torch_utils import training_stats
 from torch_utils import custom_ops
 from datetime import datetime
 import json
-from training import training_loop_3d
+from training import training_loop_3d, training_loop_joint
 
 #----------------------------------------------------------------------------
 
@@ -34,7 +34,7 @@ def subprocess_fn(rank, c, temp_dir):
         custom_ops.verbosity = 'none'
 
     # Execute training loop.
-    training_loop_3d.training_loop(rank=rank, **c)
+    training_loop_joint.training_loop(rank=rank, **c)
 
 #----------------------------------------------------------------------------
 

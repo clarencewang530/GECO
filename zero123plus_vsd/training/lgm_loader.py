@@ -81,10 +81,9 @@ class LGMLoader:
         input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(B, 6, 3, self.opt.input_size, self.opt.input_size) # [1, 4, 3, 256, 256]
         input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
         gaussians = self.model.forward_gaussians(input_image)
-        bg_color = torch.ones(3, dtype=input_image.dtype, device=input_image.device) * 0.5
-        image = self.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color)['image'] # (B, V, H, W, 3), [0, 1] 
-        pred_images_lgm = einops.rearrange(image, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2)
-        return pred_images_lgm
+        bg_color = torch.ones(3, dtype=input_image.dtype, device=input_image.device) * bg_color
+        out = self.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color) # (B, V, H, W, 3), [0, 1] 
+        return out
 
 def load_LGM(device):
     
