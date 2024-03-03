@@ -195,6 +195,8 @@ class Inferrer:
             azimuths = [0] + azimuths
         cams = [orbit_camera(ele, azi, radius=self.opt.cam_radius) for (ele, azi) in zip(elevations, azimuths)]
         cam_poses = torch.from_numpy(np.stack(cams, axis=0))
+        transform = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, self.opt.cam_radius], [0, 0, 0, 1]], dtype=torch.float32) @ torch.inverse(cam_poses[0])
+        cam_poses = transform.unsqueeze(0) @ cam_poses  # [V, 4, 4]
 
         mv_image = self.generate_mv_image(cond)
         kiui.write_image(os.path.join(out_dir, 'mv_image.png'), mv_image.transpose(1, 0, 2, 3).reshape(-1, mv_image.shape[1]*mv_image.shape[0], 3))
@@ -209,26 +211,45 @@ class Inferrer:
             input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
             input_image = torch.cat([input_image, rays_embeddings], dim=1).unsqueeze(0) # [1, 4, 9, H, W]
         
+        # azi_video = np.rad2deg(np.arange(16)/16*2*np.pi)
+        azi_video = np.arange(0, 360, 2, dtype=np.uint32)
+        ele_video = azi_video * 0
+
+        cam_video = [orbit_camera(ele, azi, radius=self.opt.cam_radius) for (ele, azi) in zip(ele_video, azi_video)]
+        cam_video = torch.from_numpy(np.stack(cam_video, axis=0)).to(self.device)
+        cam_video = transform.squeeze(0).to(self.device) @ cam_video
+        cam_video = cam_video.to(self.device)
+        cam_video[:, :3, 1:3] *= -1 # invert up & forward direction  
+        cam_view = torch.inverse(cam_video).transpose(1, 2)
+        cam_view_proj = cam_view @ self.proj_matrix
+        cam_pos = - cam_video[:, :3, 3]
+        
         with torch.no_grad():
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):    
                 gaussians = self.model.forward_gaussians(input_image) if self.opt.model_type == 'LGM' else model.forward_gaussians(input_image.unsqueeze(0), cond.astype(np.uint8))
                 print('all time', time.time() - t1)
                 ## saving gaussians and video
                 self.model.gs.save_ply(gaussians, os.path.join(out_dir, 'output.ply'))
-                images = self.render_video(np.arange(0, 16, dtype=np.int32) * 0, np.rad2deg(np.arange(16)/16*2*np.pi), gaussians)
-                for (i, img) in enumerate(images):
-                    kiui.write_image(f'{out_dir}/{i:03d}.png', img)
-                imageio.mimwrite(os.path.join(out_dir, 'output.mp4'), images, fps=30)
+                # azi_video = np.arange(0, 360, 2, dtype=np.uint32)
+                images = self.model.gs.render(gaussians, cam_view.unsqueeze(0), cam_view_proj.unsqueeze(0), cam_pos.unsqueeze(0), scale_modifier=1)['image']
 
-    def get_cam_poses(self, elevations, azimuths, bs, nv=50):
+                images = (images[0].permute(0,2,3,1).contiguous().float().cpu().numpy() * 255).astype(np.uint8)
+                # for (i, img) in enumerate(images):
+                #     kiui.write_image(f'{out_dir}/{i:03d}.png', img)
+                imageio.mimwrite(os.path.join(out_dir, 'output2.mp4'), images, fps=30)
+
+    def get_cam_poses(self, elevations, azimuths, bs=1, nv=50):
         cam_poses = [orbit_camera(ele, azi, radius=self.opt.cam_radius, opengl=True) for (ele, azi) in zip(elevations, azimuths)]
-        cam_poses = torch.from_numpy(np.stack(cam_poses, axis=0)).to(self.device)
+        cam_poses = torch.from_numpy(np.stack(cam_poses, axis=0))
+        transform = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, self.opt.cam_radius], [0, 0, 0, 1]], dtype=torch.float32) @ torch.inverse(cam_poses[0])
+        cam_poses = transform.squeeze(0).to(self.device) @ cam_poses.to(self.device)
+        rays_embeddings = default_rays_from_pose(self.device, cam_poses[:6], self.opt)
         cam_poses[:, :3, 1:3] *= -1 # invert up & forward direction
         
         cam_view = torch.inverse(cam_poses).transpose(1, 2).reshape(bs, nv, 4, 4) # [B, V, 4, 4]
         cam_view_proj = cam_view @ self.proj_matrix # [B, V, 4, 4]
         cam_pos = - cam_poses[:, :3, 3].repeat(bs, nv, 3) # [B, V, 3]
-        return cam_view, cam_view_proj, cam_pos
+        return cam_view, cam_view_proj, cam_pos, rays_embeddings
     
     def process_from_zero123plus(self, zero123out, rays_embeddings, cam_view, cam_view_proj, cam_pos, bg_color=0.5):
         B = zero123out.shape[0]
@@ -262,4 +283,4 @@ if __name__ == "__main__":
         cond = cond[..., :3] * mask + (1 - mask) * int(opt.bg * 255)
         # inferer.infer(cond, f'{opt.workspace}/gso_results/{key}/5k-cond{opt.cond_t}-t{opt.init_t}-bf16-{seed}/')
         # inferer.infer(cond, f'/mnt/kostas-graid/sw/envs/chenwang/workspace/gsec_compare/gsec512-500-950-15k-second-stage/{key}')
-        inferer.infer(cond, f'./workspace/cond950_0_5k_lvis/{key}')
+        inferer.infer(cond, f'./workspace/cond950_0_5k_lvis_75steps/{key}')

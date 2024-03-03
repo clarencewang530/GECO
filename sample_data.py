@@ -92,14 +92,7 @@ def generate(opt):
 
     # for LGM input, bs is num of scenes
     elevations, azimuths = [-30, 20, -30, 20, -30, 20], [30, 90, 150, 210, 270, 330]
-    rays_embeddings = inferrer.model.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(bs, 1, 1, 1, 1)
-
-    ele_render = np.random.randint(-90, 90, size=bs*nv)
-    azi_render = np.random.randint(0, 360, size=bs*nv)
-    for i in range(bs):
-        ele_render[i*nv:i*nv+6] = elevations
-        azi_render[i*nv:i*nv+6] = azimuths
-    cam_view, cam_view_proj, cam_pos = inferrer.get_cam_poses(ele_render, azi_render, bs, nv)
+    # rays_embeddings = inferrer.model.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(bs, 1, 1, 1, 1)
 
     # B = zero123out.shape[0]
     with torch.no_grad():
@@ -107,6 +100,15 @@ def generate(opt):
         pipeline.prepare()
         with tqdm.tqdm(loader) as pbar:
             for data in pbar:
+                ele_render = np.random.randint(-90, 90, size=bs*nv)
+                print(ele_render)
+                azi_render = np.random.randint(0, 360, size=bs*nv)
+                for i in range(bs):
+                    ele_render[i*nv:i*nv+6] = elevations
+                    azi_render[i*nv:i*nv+6] = azimuths
+                cam_view, cam_view_proj, cam_pos, rays_embeddings = inferrer.get_cam_poses(ele_render, azi_render, bs, nv)
+                rays_embeddings = rays_embeddings.unsqueeze(0).repeat(bs, 1, 1, 1, 1)
+                
                 guidance_scale = 4.0
                 prompt_embeds, cak = pipeline.prepare_conditions(data['cond'].to(device), guidance_scale=4.0)
                 pipeline.scheduler.set_timesteps(75, device=device)
