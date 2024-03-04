@@ -74,14 +74,13 @@ class LGMLoader:
         cam_pos = - cam_poses[:, :3, 3].unsqueeze(0).repeat(batch_gpu,1,1) # [B, V, 3]
         return cam_view, cam_view_proj, cam_pos
     
-    def process_from_zero123plus(self, zero123out, rays_embeddings, cam_view, cam_view_proj, cam_pos, bg_color=0.5):
+    def process_from_zero123plus(self, zero123out, rays_embeddings, cam_view, cam_view_proj, cam_pos, bg_color):
         B = zero123out.shape[0]
         input_image = einops.rearrange((zero123out + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
         input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
         input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(B, 6, 3, self.opt.input_size, self.opt.input_size) # [1, 4, 3, 256, 256]
         input_image = torch.cat([input_image, rays_embeddings], dim=2) # [1, 4, 9, H, W]
         gaussians = self.model.forward_gaussians(input_image)
-        bg_color = torch.ones(3, dtype=input_image.dtype, device=input_image.device) * bg_color
         out = self.model.gs.render(gaussians, cam_view, cam_view_proj, cam_pos, bg_color=bg_color) # (B, V, H, W, 3), [0, 1] 
         return out
 

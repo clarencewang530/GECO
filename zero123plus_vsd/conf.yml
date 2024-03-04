@@ -74,7 +74,7 @@
 
   num_input_views: 6
 
-  num_views: 8
+  num_views: 10
 
   num_workers: 8
 
@@ -88,7 +88,7 @@
 
   prob_grid_distortion: 0.5
 
-  resume: /mnt/kostas-graid/sw/envs/chenwang/workspace/instant123/logs/ft_gray_0.5bg/LGM-20240222-022708/model.safetensors
+  resume: /scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/data/model.safetensors
 
   save_freq: 200
 

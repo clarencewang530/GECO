@@ -107,10 +107,10 @@ def training_loop(
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False  # Improves numerical accuracy.
 
     # Load dataset
-    # dist.print0('Loading dataset...')
-    # data_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
-    # dataset_sampler = misc.InfiniteSampler(dataset=data_obj, rank=rank, num_replicas=num_gpus, seed=random_seed)
-    # dataset_iterator = iter(torch.utils.data.DataLoader(dataset=data_obj, sampler=dataset_sampler, batch_size=batch_size//num_gpus))
+    dist.print0('Loading dataset...')
+    data_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
+    dataset_sampler = misc.InfiniteSampler(dataset=data_obj, rank=rank, num_replicas=num_gpus, seed=random_seed)
+    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=data_obj, sampler=dataset_sampler, batch_size=batch_size//num_gpus))
 
     # Construct networks.
     dist.print0('Constructing networks...')
@@ -269,16 +269,11 @@ def training_loop(
                     # empty image and condition image
                     cross_attention_kwargs_stu = cross_attention_kwargs
                 particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
-            if Diff_kwargs.use_lgm:
-                pred_images = decode_latents(particles, vae, True)
-                pred_images_lgm = lgm_loader.process_from_zero123plus(pred_images, rays_embeddings, cam_view, cam_view_proj, cam_pos)
-                lgm_latents = encode_image(pred_images_lgm, vae, True)
-                particles = lgm_latents
 
             # Execute training loop.
             # (1) Train Generator
             with torch.no_grad():
-                y = particles if not Diff_kwargs.use_lgm else lgm_latents
+                y = particles
                 
                 t = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999).long()
                 n = torch.randn_like(y)    
@@ -310,13 +305,16 @@ def training_loop(
             pred_latents = predict_x0(G, reg_data['z'].to(device), text_embeddings_reg, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=scheduler, model=arch)
             pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus') # (-1, 1)
             if Diff_kwargs.use_lgm:
-                out = lgm_loader.process_from_zero123plus(pred_images, reg_data['rays_embeddings'].to(device), reg_data['cam_view'].to(device), reg_data['cam_view_proj'].to(device), reg_data['cam_pos'].to(device), bg_color=1.0) # (0, 1)
+                bg_color = torch.rand(3, dtype=torch.float32, device=device)
+                out = lgm_loader.process_from_zero123plus(pred_images, reg_data['rays_embeddings'].to(device), reg_data['cam_view'].to(device), reg_data['cam_view_proj'].to(device), reg_data['cam_pos'].to(device), bg_color=bg_color) # (0, 1)
                 pred_images_lgm, pred_mask_lgm = out['image'], out['alpha']
+                gt_masks = reg_data['masks_output'].to(device)
+                gt_images = reg_data['images_output'].to(device) * gt_masks + bg_color.view(1, 1, 3, 1, 1) * (1 - gt_masks)
                 loss_lpips = loss_fn_lpips(
                     F.interpolate(pred_images_lgm.view(-1, 3, opt.output_size, opt.output_size), (256, 256), mode='bilinear', align_corners=False) * 2 - 1, 
-                    F.interpolate(reg_data['images_output'].to(device).view(-1, 3, opt.output_size, opt.output_size), (256, 256), mode='bilinear', align_corners=False) * 2 - 1
+                    F.interpolate(gt_images.view(-1, 3, opt.output_size, opt.output_size), (256, 256), mode='bilinear', align_corners=False) * 2 - 1
                 ).mean()
-                loss_l2 = F.mse_loss(pred_images_lgm, reg_data['images_output'].to(device)) + F.mse_loss(pred_mask_lgm, reg_data['masks_output'].to(device))
+                loss_l2 = F.mse_loss(pred_images_lgm, gt_images) + F.mse_loss(pred_mask_lgm, gt_masks)
                 loss_reg = loss_l2 + loss_lpips
             else:
                 loss_reg = 0.5 * loss_fn_lpips( 
@@ -331,8 +329,7 @@ def training_loop(
         optimizer_step(G_params_post, G_opt)
 
         if (rank == 0) and (image_snapshot_ticks is not None) and (cur_tick % image_snapshot_ticks == 0):
-            print(reg_data['index'])
-            gt_images = reg_data['images_output'].detach().cpu().numpy()
+            gt_images = gt_images.detach().cpu().numpy()
             out_images = pred_images_lgm.detach().cpu().numpy()
             gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(-1, gt_images.shape[1] * gt_images.shape[3], 3) # [B*output_size, V*output_size, 3]
             out_images = out_images.transpose(0, 3, 1, 4, 2).reshape(-1, out_images.shape[1] * out_images.shape[3], 3) # [B*output_size, V*output_size, 3]
@@ -341,14 +338,14 @@ def training_loop(
             kiui.write_image(f'{run_dir}/gt_pred_{cur_tick}.png', output)
 
             save_image_grid(reg_data['cond'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(reg_data['cond'].shape[0], 8))
-            save_image_grid(pred_images.detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, pred_images.shape[0]), max( (pred_images.shape[0]+1) // 8, 1)))
+            save_image_grid(pred_images.detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, pred_images.shape[0]), max( (pred_images.shape[0]+1) // 8, 1)))   
         
         if Diff_kwargs.use_vsd:
             # # (2) Train Diffusion
             if loss_type == 'sds':
                 loss_diff = 0.0
             else:
-                x_stu = particles.clone().detach() if not Diff_kwargs.use_lgm else lgm_latents.clone().detach()
+                x_stu = particles.clone().detach() 
                 n_phi = torch.randn_like(x_stu)
                 t_phi = (((0.02 - 0.98) * torch.rand([batch_gpu], device=device) + 0.98) * 999)
                 t_phi = t_phi if arch == 'unet_edm' else t_phi.long()
@@ -416,8 +413,6 @@ def training_loop(
                         out = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
                         if Diff_kwargs.latent:
                             img = decode_latents(out, vae, arch=='unet_zero123plus')
-                        if Diff_kwargs.use_lgm:
-                            img = torch.cat((img, pred_images, (pred_images_lgm - 0.5)*2), dim=0)
                         save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-rand.png'), drange=[-1, 1], grid_size=get_grid_size(img.shape[0], 8))
                         save_image_grid(data['img'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(out.shape[0], 8))
         torch.cuda.empty_cache()

@@ -14,7 +14,7 @@ import einops
 class ObjaverseSingleViewData(Dataset):
     def __init__(self, path, source_size=256):
         self.root_dir = path
-        self.paths = sorted(glob.glob(os.path.join(self.root_dir, '**/**.png')))
+        self.paths = sorted(glob.glob(os.path.join(self.root_dir, '**.png')))
         print('num of images', len(self.paths))
         self.source_size = source_size
     
