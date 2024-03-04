@@ -165,7 +165,7 @@ class NoiseImageLGMDataset(Dataset):
         six_view_path = os.path.join(self.path, self.scenes[idx], '6view.png')
 
         six_view = np.array(Image.open(six_view_path).resize((512, 768))) / 255.0
-        six_view = einops.rearrange((six_view + 1) / 2, '(h2 h) (w2 w) c -> (h2 w2) c h w', h2=3, w2=2) # (6, 320, 320, 3)
+        six_view = einops.rearrange(six_view, '(h2 h) (w2 w) c -> (h2 w2) c h w', h2=3, w2=2) # (6, 320, 320, 3)
         images_input = torch.from_numpy(six_view)
 
         images = []
