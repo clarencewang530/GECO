@@ -126,8 +126,8 @@ class RefOnlyNoisedUNet(torch.nn.Module):
         is_cfg_guidance = cross_attention_kwargs.get('is_cfg_guidance', False)
         noise = torch.randn_like(cond_lat)
         if self.is_generator:
-            cond_timestep = torch.randint(500, 501, size=timestep.shape, device=timestep.device)
-            # cond_timestep = torch.zeros_like(timestep, dtype=timestep.dtype, device=timestep.device)
+            # cond_timestep = torch.randint(500, 501, size=timestep.shape, device=timestep.device)
+            cond_timestep = torch.zeros_like(timestep, dtype=timestep.dtype, device=timestep.device)
             # if self.training:
             #     cond_timestep = torch.randint(200, size=timestep.shape, device=timestep.device)
             # else:

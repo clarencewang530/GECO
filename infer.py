@@ -137,8 +137,10 @@ class Inferrer:
                 # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs/zero123plus/zero123plus-gpus1-batch1-same-vsd-20240224-060403-cond500_t950/network-snapshot-005000.pkl"
                 # resume_pkl = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs1/zero123plus-lvis/zero123plus-gpus1-batch1-same-vsd-20240301-192604-cond0_t950_lvis/network-snapshot-005000.pkl"
                 # resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/network-snapshot-020000.pkl"
-                resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/training-runs/zero123plus-dtype/zero123plus-gpus1-batch4-same-vsd-20240304-085316-vsd_l2/network-snapshot-005800.pkl"
+                # resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/training-runs/zero123plus-dtype/zero123plus-gpus1-batch4-same-vsd-20240304-085316-vsd_l2/network-snapshot-005800.pkl"
                 # resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/training-runs/zero123plus-dtype/zero123plus-gpus1-batch4-same-vsd-20240303-220733-800_vsdtrianlgm/network-snapshot-006000.pkl"
+                # resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/training-runs/zero123plus-dtype/zero123plus-gpus1-batch4-same-vsd-20240304-085316-vsd_l2/network-snapshot-006000.pkl"
+                resume_pkl = "/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/logs-joint/jiatao/network-snapshot-020000.pkl"
                 resume_data = pickle.load(open(resume_pkl, 'rb'))
                 copy_params_and_buffers(resume_data['G'], pipe.unet, require_all=False)
                 pipe.unet.eval()
@@ -274,6 +276,7 @@ if __name__ == "__main__":
     # file_paths = json.load(open(opt.test_path, 'r'))
     paths = sorted(os.listdir('/scratch/inf0/user/lliu/chenwang/gso_recon_gsec512'))
     file_paths = {f: f'/scratch/inf0/user/lliu/chenwang/gso_recon_gsec512/{f}/000.png' for f in paths}
+    # file_paths = {'lysol': '/scratch/inf0/user/lliu/chenwang/Zero123PlusGS/zero123plus_vsd/data/lysol.png'}
     ## testing
     for key in file_paths.keys():
         print(key)
