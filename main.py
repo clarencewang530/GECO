@@ -151,6 +151,11 @@ def main():
                     pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(-1, pred_images.shape[1] * pred_images.shape[3], 3)
                     kiui.write_image(f'{opt.workspace}/train_pred_images_{epoch}_{i}.jpg', pred_images)
 
+                    import pdb; pdb.set_trace();
+                    if 'zero123plus' in out:
+                        zero123plus_out = (out['zero123plus'].detach().cpu().numpy().clip(-1, 1) + 1) / 2 # (B, 3, 960, 640)
+                        zero123plus_out = zero123plus_out.transpose(2, 0, 3, 1).reshape(zero123plus_out.shape[2], -1, 3)
+                        kiui.write_image(f'{opt.workspace}/train_pred_zero123_images_{epoch}_{i}.jpg', zero123plus_out)
                     # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
                     # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
                     # kiui.write_image(f'{opt.workspace}/train_pred_alphas_{epoch}_{i}.jpg', pred_alphas)

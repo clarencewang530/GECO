@@ -324,6 +324,7 @@ class Zero123PlusGaussian(nn.Module):
             loss = loss + self.opt.lambda_lpips * loss_lpips
             
         results['loss'] = loss
+        results['zero123plus'] = zero123out
 
         # metric
         with torch.no_grad():
