@@ -21,8 +21,8 @@ from utils.diff import extract_lora_diffusers, predict_noise0_diffuser, predict_
 from utils.saving import *
 from training.lgm_loader import LGMLoader, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import einops
-from piq import LPIPS
-from training.dataset import NoiseImagePairDataset
+from kiui.lpips import LPIPS
+from training.dataset import NoiseImagePairDataset, NoiseImageLGMDataset
 
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
@@ -107,10 +107,10 @@ def training_loop(
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False  # Improves numerical accuracy.
 
     # Load dataset
-    dist.print0('Loading dataset...')
-    data_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
-    dataset_sampler = misc.InfiniteSampler(dataset=data_obj, rank=rank, num_replicas=num_gpus, seed=random_seed)
-    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=data_obj, sampler=dataset_sampler, batch_size=batch_size//num_gpus))
+    # dist.print0('Loading dataset...')
+    # data_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
+    # dataset_sampler = misc.InfiniteSampler(dataset=data_obj, rank=rank, num_replicas=num_gpus, seed=random_seed)
+    # dataset_iterator = iter(torch.utils.data.DataLoader(dataset=data_obj, sampler=dataset_sampler, batch_size=batch_size//num_gpus))
 
     # Construct networks.
     dist.print0('Constructing networks...')
@@ -158,12 +158,13 @@ def training_loop(
         rays_embeddings = lgm.prepare_default_rays(device, elevations, azimuths).unsqueeze(0).repeat(batch_gpu, 1, 1, 1, 1)
         cam_view, cam_view_proj, cam_pos = lgm_loader.get_cam_poses(elevations, azimuths, batch_gpu)
         bg_color = torch.ones(3, dtype=dtype, device=device) * 0.5
-    
+
     if Diff_kwargs.use_reg:
-        nip_dataset = NoiseImagePairDataset(Diff_kwargs.reg_data_path)
+        nip_dataset = NoiseImageLGMDataset(Diff_kwargs.reg_data_path, opt)
         nip_sampler = misc.InfiniteSampler(dataset=nip_dataset, rank=rank, num_replicas=num_gpus, seed=random_seed)
         nip_iterator = iter(torch.utils.data.DataLoader(dataset=nip_dataset, sampler=nip_sampler, batch_size=1))
-        loss_fn_lpips = LPIPS(replace_pooling=True, reduction='none').to(device)
+        # loss_fn_lpips = LPIPS(replace_pooling=True, reduction='none').to(device)
+        loss_fn_lpips = LPIPS(net='vgg').to(device).requires_grad_(False)
 
     if gen_type == 'sin':
         all_images = torch.nn.Parameter(torch.rand(1, 4, int(ratio*resolution), resolution, device=device))
@@ -177,12 +178,12 @@ def training_loop(
             G.eval()
             out = predict_x0(G, grid_z, text_embeddings_vis, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_vis, scheduler=scheduler, model=arch)
         save_image_grid(out.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'init_latents.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
-        if Diff_kwargs.latent:
-            image = decode_latents(out, vae, arch == 'unet_zero123plus')
-            save_image_grid(image.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'init_img.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
+        # if Diff_kwargs.latent:
+        #     image = decode_latents(out, vae, arch == 'unet_zero123plus')
+        #     save_image_grid(image.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'init_img.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
 
     dist.print0('Setting up optimizer...')
-    G_opt = dnnlib.util.construct_class_by_name(params=G_params, **G_opt_kwargs) # subclass of torch.optim.Optimizer
+    G_opt = dnnlib.util.construct_class_by_name(params=list(G_params)+list(lgm_loader.model.parameters()), **G_opt_kwargs) # subclass of torch.optim.Optimizer
     Diff_opt = dnnlib.util.construct_class_by_name(params=Diff_params, **Diff_opt_kwargs) # subclass of torch.optim.Optimizer
 
     # Resume from existing pickle.
@@ -269,8 +270,10 @@ def training_loop(
                     cross_attention_kwargs_stu = cross_attention_kwargs
                 particles = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
             if Diff_kwargs.use_lgm:
-                with torch.no_grad():
-                    lgm_latents = lgm_loader.process_from_zero123plus(particles, rays_embeddings, cam_view, cam_view_proj, cam_pos)
+                pred_images = decode_latents(particles, vae, True)
+                pred_images_lgm = lgm_loader.process_from_zero123plus(pred_images, rays_embeddings, cam_view, cam_view_proj, cam_pos)
+                lgm_latents = encode_image(pred_images_lgm, vae, True)
+                particles = lgm_latents
 
             # Execute training loop.
             # (1) Train Generator
@@ -305,19 +308,42 @@ def training_loop(
             with torch.no_grad():
                 text_embeddings_reg, cross_attention_kwargs_reg = pipe.prepare_conditions(reg_data['cond'], guidance_scale=Diff_kwargs.cfg_tchr)
             pred_latents = predict_x0(G, reg_data['z'].to(device), text_embeddings_reg, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=scheduler, model=arch)
-            pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus')
+            pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus') # (-1, 1)
             if Diff_kwargs.use_lgm:
-                pred_images_lgm = lgm_loader.process_from_zero123plus(pred_images, rays_embeddings, cam_view, cam_view_proj, cam_pos)
-                loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images_lgm.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
-                loss_reg += 0.5 * F.mse_loss(pred_images_lgm, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
+                bg_color = torch.rand(3, dtype=torch.float32, device=device)
+                out = lgm_loader.process_from_zero123plus(pred_images, reg_data['rays_embeddings'].to(device), reg_data['cam_view'].to(device), reg_data['cam_view_proj'].to(device), reg_data['cam_pos'].to(device), bg_color=bg_color) # (0, 1)
+                pred_images_lgm, pred_mask_lgm = out['image'], out['alpha']
+                gt_masks = reg_data['masks_output'].to(device)
+                gt_images = reg_data['images_output'].to(device) * gt_masks + bg_color.view(1, 1, 3, 1, 1) * (1 - gt_masks)
+                loss_lpips = loss_fn_lpips(
+                    F.interpolate(pred_images_lgm.view(-1, 3, opt.output_size, opt.output_size), (256, 256), mode='bilinear', align_corners=False) * 2 - 1, 
+                    F.interpolate(gt_images.view(-1, 3, opt.output_size, opt.output_size), (256, 256), mode='bilinear', align_corners=False) * 2 - 1
+                ).mean()
+                loss_l2 = F.mse_loss(pred_images_lgm, gt_images) + F.mse_loss(pred_mask_lgm, gt_masks)
+                loss_reg = loss_l2 + loss_lpips
             else:
-                loss_reg = 0.5 * loss_fn_lpips( (F.interpolate(pred_images.clamp(-1, 1), (int(224*ratio), 224)) + 1) / 2, (F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224)) + 1) / 2 ).mean()
-                loss_reg += 0.5 * F.mse_loss(pred_images, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
+                loss_reg = 0.5 * loss_fn_lpips( 
+                    F.interpolate(pred_images.clamp(-1, 1), (int(224*ratio), 224)), 
+                    F.interpolate(reg_data['image'].to(device), (int(224*ratio), 224))
+                ).mean()
+                # loss_reg += 0.5 * F.mse_loss(pred_images, reg_data['image'].to(device), reduction="sum") / pred_images.shape[0]
             loss_vsd += loss_reg
 
         loss_vsd.backward()
-        G_params_post = [param for param in (G.parameters() if gen_type != 'sin' else [all_images]) if param.numel() > 0 and param.grad is not None]
+        G_params_post = [param for param in (list(G.parameters())+list(lgm_loader.model.parameters())) if param.numel() > 0 and param.grad is not None]
         optimizer_step(G_params_post, G_opt)
+
+        if (rank == 0) and (image_snapshot_ticks is not None) and (cur_tick % image_snapshot_ticks == 0):
+            gt_images = gt_images.detach().cpu().numpy()
+            out_images = pred_images_lgm.detach().cpu().numpy()
+            gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(-1, gt_images.shape[1] * gt_images.shape[3], 3) # [B*output_size, V*output_size, 3]
+            out_images = out_images.transpose(0, 3, 1, 4, 2).reshape(-1, out_images.shape[1] * out_images.shape[3], 3) # [B*output_size, V*output_size, 3]
+            output = np.concatenate([gt_images, out_images], axis=0)            
+            
+            kiui.write_image(f'{run_dir}/gt_pred_{cur_tick}.png', output)
+
+            save_image_grid(reg_data['cond'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(reg_data['cond'].shape[0], 8))
+            save_image_grid(pred_images.detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, pred_images.shape[0]), max( (pred_images.shape[0]+1) // 8, 1)))
         
         if Diff_kwargs.use_vsd:
             # # (2) Train Diffusion
@@ -392,20 +418,17 @@ def training_loop(
                         out = predict_x0(G, z, text_embeddings, t=Diff_kwargs.init_t, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, model=arch)
                         if Diff_kwargs.latent:
                             img = decode_latents(out, vae, arch=='unet_zero123plus')
-                        save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-rand.png'), drange=[-1, 1], grid_size=get_grid_size(out.shape[0], 8))
+                        if Diff_kwargs.use_lgm:
+                            img = torch.cat((img, pred_images, (pred_images_lgm - 0.5)*2), dim=0)
+                        save_image_grid(img.clone().detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-rand.png'), drange=[-1, 1], grid_size=get_grid_size(img.shape[0], 8))
                         save_image_grid(data['img'].clone().detach().permute(0,3,1,2).clamp(0, 255).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-cond.png'), drange=[0, 255], grid_size=get_grid_size(out.shape[0], 8))
-            if Diff_kwargs.use_reg:
-                out = torch.cat((reg_data['image'].clone().detach().cpu(), pred_images.clone().detach().cpu()), dim=0)
-                if Diff_kwargs.use_lgm:
-                    out = torch.cat((out, pred_images_lgm.clone().detach().cpu()), dim=0)
-                save_image_grid(out.clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, out.shape[0]), max( (out.shape[0]+1) // 8, 1)))
         torch.cuda.empty_cache()
 
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
-            snapshot_data = dict(dataset_kwargs=dict(dataset_kwargs))
+            snapshot_data = dict()
             for name, module in [('Diff', Diff)]:
                 if module is not None:
                     if num_gpus > 1:
@@ -417,6 +440,11 @@ def training_loop(
                 snapshot_data['all_img'] = all_images.clone().detach().cpu()
             else:
                 snapshot_data['G'] = copy.deepcopy(G).eval().requires_grad_(False).cpu()
+                if Diff_kwargs.use_lgm:
+                    torch.save(
+                        {'LGM': lgm_loader.model.state_dict()},
+                        os.path.join(run_dir, f'lgm-{cur_tick:06d}.pt')
+                    )
             snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_tick:06d}.pkl')
             if rank == 0:
                 with open(snapshot_pkl, 'wb') as f:

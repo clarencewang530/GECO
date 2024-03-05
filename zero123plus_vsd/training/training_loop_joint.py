@@ -306,6 +306,7 @@ def training_loop(
             pred_images = decode_latents(pred_latents, vae, arch == 'unet_zero123plus') # (-1, 1)
             if Diff_kwargs.use_lgm:
                 bg_color = torch.rand(3, dtype=torch.float32, device=device)
+                save_image_grid(pred_images.detach().clamp(-1, 1).cpu(), os.path.join(run_dir, f'{cur_tick:06d}-reg.png'), drange=[-1, 1], grid_size=(min(8, pred_images.shape[0]), max( (pred_images.shape[0]+1) // 8, 1)))
                 out = lgm_loader.process_from_zero123plus(pred_images, reg_data['rays_embeddings'].to(device), reg_data['cam_view'].to(device), reg_data['cam_view_proj'].to(device), reg_data['cam_pos'].to(device), bg_color=bg_color) # (0, 1)
                 pred_images_lgm, pred_mask_lgm = out['image'], out['alpha']
                 gt_masks = reg_data['masks_output'].to(device)

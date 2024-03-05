@@ -51,9 +51,10 @@ class LGMLoader:
             print(f'[WARN] model randomly initialized, are you sure?')
 
         # device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(device)
+        self.device = device
         self.model.float().to(self.device)
-        self.model.eval().requires_grad_(False)
+        self.model.train().requires_grad_(True)
 
         tan_half_fov = np.tan(0.5 * np.deg2rad(opt.fovy))
         proj_matrix = torch.zeros(4, 4, dtype=torch.float32, device=self.device)
