@@ -11,6 +11,7 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from safetensors.torch import load_file
 from core.dataset import ObjaverseDataset as Dataset
+from core.dataset_pseudo import NoiseImageLGMDataset
 
 import kiui
 from datetime import datetime
@@ -34,7 +35,7 @@ def main():
     elif opt.model_type == 'LGM':
         model = LGM(opt)
     # model = SingleSplatterImage(opt)
-    opt.workspace += datetime.now().strftime("%Y%m%d-%H%M%S")
+    opt.workspace += opt.model_type + '-' + datetime.now().strftime("%Y%m%d-%H%M%S")
     writer = tensorboard.SummaryWriter(opt.workspace)
 
     import shutil, os
@@ -43,6 +44,9 @@ def main():
     for folder in ['core']:
         dst_dir = os.path.join(src_snapshot_folder, folder)
         shutil.copytree(folder, dst_dir, ignore=ignore_func, dirs_exist_ok=True)
+    import yaml
+    with open(os.path.join(opt.workspace, 'config.yml'), 'w') as f:
+        yaml.dump(tyro.extras.to_yaml(opt), f)
 
     # resume
     if opt.resume is not None:
@@ -63,7 +67,7 @@ def main():
             else:
                 accelerator.print(f'[WARN] unexpected param {k}: {v.shape}')
     
-    train_dataset = Dataset(opt, training=True)
+    train_dataset = Dataset(opt, training=True) if opt.stage == 1 else NoiseImageLGMDataset(opt, training=True)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=opt.batch_size,
@@ -73,7 +77,7 @@ def main():
         drop_last=False,
     )
 
-    test_dataset = Dataset(opt, training=False)
+    test_dataset = Dataset(opt, training=False) if opt.stage == 1 else NoiseImageLGMDataset(opt, training=False)
     test_dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=opt.batch_size,
@@ -91,7 +95,8 @@ def main():
     total_steps = opt.num_epochs * len(train_dataloader)
     pct_start = 3000 / total_steps
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=opt.lr, total_steps=total_steps, pct_start=pct_start)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3000, eta_min=1e-6)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3000, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3000)
 
     # accelerate
     model, optimizer, train_dataloader, test_dataloader, scheduler = accelerator.prepare(
@@ -126,29 +131,29 @@ def main():
                 total_loss += loss.detach()
                 total_psnr += psnr.detach()
 
-            # if accelerator.is_main_process:
-            #     # logging
-            #     if i % 100 == 0:
-            #         mem_free, mem_total = torch.cuda.mem_get_info()    
-            #         print(f"[INFO] {i}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {scheduler.get_last_lr()[0]:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}")
+            if accelerator.is_main_process:
+                # logging
+                if i % 100 == 0:
+                    mem_free, mem_total = torch.cuda.mem_get_info()    
+                    print(f"[INFO] {i}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {scheduler.get_last_lr()[0]:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}")
                 
-            #     # save log images
-            #     if i % 500 == 0:
-            #         gt_images = data['images_output'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
-            #         gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(-1, gt_images.shape[1] * gt_images.shape[3], 3) # [B*output_size, V*output_size, 3]
-            #         kiui.write_image(f'{opt.workspace}/train_gt_images_{epoch}_{i}.jpg', gt_images)
+                # save log images
+                if i % 500 == 0:
+                    gt_images = data['images_output'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
+                    gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(-1, gt_images.shape[1] * gt_images.shape[3], 3) # [B*output_size, V*output_size, 3]
+                    kiui.write_image(f'{opt.workspace}/train_gt_images_{epoch}_{i}.jpg', gt_images)
 
-            #         # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
-            #         # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
-            #         # kiui.write_image(f'{opt.workspace}/train_gt_alphas_{epoch}_{i}.jpg', gt_alphas)
+                    # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
+                    # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
+                    # kiui.write_image(f'{opt.workspace}/train_gt_alphas_{epoch}_{i}.jpg', gt_alphas)
 
-            #         pred_images = out['images_pred'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
-            #         pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(-1, pred_images.shape[1] * pred_images.shape[3], 3)
-            #         kiui.write_image(f'{opt.workspace}/train_pred_images_{epoch}_{i}.jpg', pred_images)
+                    pred_images = out['images_pred'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
+                    pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(-1, pred_images.shape[1] * pred_images.shape[3], 3)
+                    kiui.write_image(f'{opt.workspace}/train_pred_images_{epoch}_{i}.jpg', pred_images)
 
-            #         # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
-            #         # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
-            #         # kiui.write_image(f'{opt.workspace}/train_pred_alphas_{epoch}_{i}.jpg', pred_alphas)
+                    # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
+                    # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
+                    # kiui.write_image(f'{opt.workspace}/train_pred_alphas_{epoch}_{i}.jpg', pred_alphas)
 
         total_loss = accelerator.gather_for_metrics(total_loss).mean()
         total_psnr = accelerator.gather_for_metrics(total_psnr).mean()
@@ -197,6 +202,7 @@ def main():
                 if accelerator.is_main_process:
                     total_psnr /= len(test_dataloader)
                     accelerator.print(f"[eval] epoch: {epoch} psnr: {psnr:.4f}")
+                    writer.add_scalar('eval/psnr', total_psnr.item(), epoch)
 
 
 

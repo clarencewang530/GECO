@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 import numpy as np
 
 import kiui
@@ -11,6 +12,9 @@ import einops
 
 from core.options import Options
 from core.gs import GaussianRenderer
+from core.unet import UNet
+import pickle
+from core.dataset import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 def unscale_latents(latents):
     latents = latents / 0.75 + 0.22
@@ -146,6 +150,23 @@ class UNetDecoder(nn.Module):
         return torch.cat([others, rgb], dim=1)
         # return rgb
 
+def params_and_buffers(module):
+    assert isinstance(module, torch.nn.Module)
+    return list(module.parameters()) + list(module.buffers())
+
+def named_params_and_buffers(module):
+    assert isinstance(module, torch.nn.Module)
+    return list(module.named_parameters()) + list(module.named_buffers())
+
+@torch.no_grad()
+def copy_params_and_buffers(src_module, dst_module, require_all=False):
+    assert isinstance(src_module, torch.nn.Module)
+    assert isinstance(dst_module, torch.nn.Module)
+    src_tensors = dict(named_params_and_buffers(src_module))
+    for name, tensor in named_params_and_buffers(dst_module):
+        assert (name in src_tensors) or (not require_all)
+        if name in src_tensors:
+            tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
 
 class Zero123PlusGaussian(nn.Module):
     def __init__(
@@ -167,12 +188,32 @@ class Zero123PlusGaussian(nn.Module):
         self.vae = self.pipe.vae.requires_grad_(False).eval()
         self.vae.decoder.requires_grad_(False).eval()
 
-        self.unet = self.pipe.unet.eval().requires_grad_(False)
+        self.gen = self.pipe.unet.eval().requires_grad_(False)
         self.pipe.scheduler = DDPMScheduler.from_config(self.pipe.scheduler.config)
-        self.decoder = UNetDecoder(self.vae)
+
+        resume_data = pickle.load(open(self.opt.resume_pkl, 'rb'))
+        copy_params_and_buffers(resume_data['G'], self.gen, require_all=False)
+        self.gen.train()
+        self.gen.is_generator = True
+
+        # self.decoder = UNetDecoder(self.vae)
 
         # add auxiliary layer for generating gaussian (14 channels)
         # self.conv = nn.Conv2d(3, 14, kernel_size=3, stride=1, padding=1)
+
+        # unet
+        self.unet = UNet(
+            9, 14, 
+            down_channels=self.opt.down_channels,
+            down_attention=self.opt.down_attention,
+            mid_attention=self.opt.mid_attention,
+            up_channels=self.opt.up_channels,
+            up_attention=self.opt.up_attention,
+            num_frames=self.opt.num_input_views
+        )
+
+        # last conv
+        self.conv = nn.Conv2d(14, 14, kernel_size=1) # 
 
         # Gaussian Renderer
         self.gs = GaussianRenderer(opt)
@@ -196,51 +237,56 @@ class Zero123PlusGaussian(nn.Module):
                 del state_dict[k]
         return state_dict
 
-    def forward_gaussians(self, images, cond):
+    def forward_gaussians(self, images):
+        # images: [B, 4, 9, H, W]
+        # return: Gaussians: [B, dim_t]
+
         B, V, C, H, W = images.shape
-        with torch.no_grad():
-            text_embeddings, cross_attention_kwargs = self.pipe.prepare_conditions(cond, guidance_scale=4.0)
-            cross_attention_kwargs_stu = cross_attention_kwargs
+        images = images.view(B*V, C, H, W)
 
-        # make input 6 views into a 3x2 grid
-        images = einops.rearrange(images, 'b (h2 w2) c h w -> b c (h2 h) (w2 w)', h2=3, w2=2) 
+        x = self.unet(images) # [B*4, 14, h, w]
+        x = self.conv(x) # [B*4, 14, h, w]
 
-        # scale as in zero123plus
-        latents = encode_image(images, self.vae)
-        t = torch.tensor([10] * B, device=latents.device)
-        latents = self.pipe.scheduler.add_noise(latents, torch.randn_like(latents, device=latents.device), t)
-        x = predict_x0(
-            self.unet, latents, text_embeddings, t=10, guidance_scale=1.0, 
-            cross_attention_kwargs=cross_attention_kwargs, scheduler=self.pipe.scheduler, model='zero123plus')
-        # x = torch.randn([B, 4, 96, 64], device=images.device)
-        x = decode_latents(x, self.decoder) # (B, 14, H, W)
-        # x = self.conv(x)
+        x = x.reshape(B, self.opt.num_input_views, 14, self.opt.splat_size, self.opt.splat_size)
+        
+        ## visualize multi-view gaussian features for plotting figure
+        # tmp_alpha = self.opacity_act(x[0, :, 3:4])
+        # tmp_img_rgb = self.rgb_act(x[0, :, 11:]) * tmp_alpha + (1 - tmp_alpha)
+        # tmp_img_pos = self.pos_act(x[0, :, 0:3]) * 0.5 + 0.5
+        # kiui.vis.plot_image(tmp_img_rgb, save=True)
+        # kiui.vis.plot_image(tmp_img_pos, save=True)
 
-        x = einops.rearrange(x, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2) # (B*6, 14, H, W)
-        x = x.reshape(B*6, -1, H, W)
-
-        x = x.reshape(B, V, 14, 256, 256)
         x = x.permute(0, 1, 3, 4, 2).reshape(B, -1, 14)
         
-        pos = self.pos_act(x[..., :3]) # [B, N, 3]
+        pos = self.pos_act(x[..., 0:3]) # [B, N, 3]
         opacity = self.opacity_act(x[..., 3:4])
         scale = self.scale_act(x[..., 4:7])
         rotation = self.rot_act(x[..., 7:11])
-        rgbs = x[..., 11:] # FIXME: original activation removed
+        rgbs = self.rgb_act(x[..., 11:])
 
         gaussians = torch.cat([pos, opacity, scale, rotation, rgbs], dim=-1) # [B, N, 14]
         return gaussians
     
     def forward(self, data, step_ratio=1):
+        with torch.no_grad():
+            text_embeddings_reg, cross_attention_kwargs_reg = self.pipe.prepare_conditions(data['cond'], guidance_scale=4.0)
+
+        pred_latents = predict_x0(self.gen, data['z'], text_embeddings_reg, t=950, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=self.pipe.scheduler, model='zero123plus')
+        zero123out = decode_latents(pred_latents, self.vae, True) # (-1, 1)
+        input_image = einops.rearrange((zero123out + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
+        input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
+        input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(-1, 6, 3, self.opt.input_size, self.opt.input_size) # [B, V, 3, 256, 256]
+        final_input = torch.cat([input_image, data['rays_embeddings']], dim=2)
+
         # Gaussian shape: (B*6, 14, H, W)
         results = {}
         loss = 0
 
-        images = data['input'] # [B, 4, 9, h, W], input features
+        # images = data['input'] # [B, 4, 9, h, W], input features
         cond = data['cond'] # [B, H, W, 3], condition image
         
         # use the first view to predict gaussians
-        gaussians = self.forward_gaussians(images, cond) # [B, N, 14]
+        gaussians = self.forward_gaussians(final_input) # [B, N, 14]
 
         results['gaussians'] = gaussians
 

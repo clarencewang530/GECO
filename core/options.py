@@ -47,6 +47,7 @@ class Options:
     num_workers: int = 8
 
     ### training
+    stage: int = 1
     # workspace
     workspace: str = './workspace'
     # resume
@@ -71,6 +72,7 @@ class Options:
     prob_cam_jitter: float = 0.5
     save_freq: int = 200
     eval_freq: int = 200
+    resume_pkl: str = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs1/zero123plus-lvis/zero123plus-gpus1-batch1-same-vsd-20240301-192604-cond0_t950_lvis/network-snapshot-005000.pkl"
 
     ### testing
     # test image path

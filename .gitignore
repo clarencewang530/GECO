@@ -34,5 +34,6 @@ fid-refs
 
 diff-gaussian-rasterization
 pretrained
-logs
-workspace
+logs**
+test**
+workspace**
