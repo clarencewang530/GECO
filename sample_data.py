@@ -170,7 +170,7 @@ def generate(opt):
                     mask = output['alpha'].permute(0, 1, 3, 4, 2).cpu().numpy()
         
                     for i, imgs in enumerate(image):
-                         name = data["path"][i]
+                        name = data["path"][i]
                         os.makedirs(os.path.join(output_path, name), exist_ok=True)
                         Image.fromarray(data['cond'][i].cpu().numpy().astype(np.uint8)).save(os.path.join(output_path, f'{name}/cond.png'))
                         with open(os.path.join(output_path, 'rng.txt'), 'w') as f:
