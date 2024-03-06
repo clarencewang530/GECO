@@ -113,8 +113,8 @@ def generate(opt):
         pipeline = inferrer.pipe
         pipeline.prepare()
         with tqdm.tqdm(loader) as pbar:
-            for idx, data in enumerate(pbar):
-                g_cuda.manual_seed(idx)
+            for data in pbar:
+                g_cuda.manual_seed(42)
                 ele_render = np.random.randint(-90, 90, size=bs*nv)
                 azi_render = np.random.randint(0, 360, size=bs*nv)
                 for i in range(bs):
