@@ -73,6 +73,7 @@ class Options:
     save_freq: int = 200
     eval_freq: int = 200
     resume_pkl: str = "/mnt/kostas-graid/sw/envs/chenwang/workspace/instant123-old/training-runs1/zero123plus-lvis/zero123plus-gpus1-batch1-same-vsd-20240301-192604-cond0_t950_lvis/network-snapshot-005000.pkl"
+    joint: bool = False
 
     ### testing
     # test image path

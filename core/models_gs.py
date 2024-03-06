@@ -193,7 +193,11 @@ class Zero123PlusGaussian(nn.Module):
 
         resume_data = pickle.load(open(self.opt.resume_pkl, 'rb'))
         copy_params_and_buffers(resume_data['G'], self.gen, require_all=False)
-        self.gen.train().requires_grad_(True)
+        if self.opt.joint:
+            self.gen.train().requires_grad_(True)
+        else:
+            self.gen.eval().requires_grad_(False)
+        print('is joint training:', self.opt.joint)
         self.gen.is_generator = True
 
         # self.decoder = UNetDecoder(self.vae)
