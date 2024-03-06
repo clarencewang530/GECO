@@ -57,6 +57,20 @@ class ObjaverseLVISData(Dataset):
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
+import random
+def seed_everything(seed: int):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+seed = 42
+seed_everything(seed)
+g_cuda = torch.Generator(device='cuda')
+g_cuda.manual_seed(42)
+
 def generate(opt):
     bs = opt.sample_bs
     nv = opt.sample_nv
@@ -136,7 +150,7 @@ def generate(opt):
                         # compute the previous noisy sample x_t -> x_t-1
                         latents = pipeline.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                     latents_out = unscale_latents(latents)
-                    image = pipeline.vae.decode(latents_out / pipeline.vae.config.scaling_factor, return_dict=False)[0]
+                    image = pipeline.vae.decode(latents_out / pipeline.vae.config.scaling_factor, return_dict=False, generator=g_cuda)[0]
                     image = unscale_image(image) # (B, 3, H, W)
                 result = pipeline.image_processor.postprocess(image, output_type='pil')
                 # result[0].save(f'./{data["path"][0]}.png')
