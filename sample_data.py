@@ -113,7 +113,8 @@ def generate(opt):
         pipeline = inferrer.pipe
         pipeline.prepare()
         with tqdm.tqdm(loader) as pbar:
-            for data in pbar:
+            for idx, data in enumerate(pbar):
+                g_cuda.manual_seed(idx)
                 ele_render = np.random.randint(-90, 90, size=bs*nv)
                 azi_render = np.random.randint(0, 360, size=bs*nv)
                 for i in range(bs):
@@ -169,9 +170,11 @@ def generate(opt):
                     mask = output['alpha'].permute(0, 1, 3, 4, 2).cpu().numpy()
         
                     for i, imgs in enumerate(image):
-                        name = data["path"][i]
+                         name = data["path"][i]
                         os.makedirs(os.path.join(output_path, name), exist_ok=True)
                         Image.fromarray(data['cond'][i].cpu().numpy().astype(np.uint8)).save(os.path.join(output_path, f'{name}/cond.png'))
+                        with open(os.path.join(output_path, 'rng.txt'), 'w') as f:
+                            f.write(f'{idx}\n')
                         np.save(os.path.join(output_path, f'{data["path"][i]}/z.npy'), latents_init[i].cpu().numpy())
                         np.save(os.path.join(output_path, f'{data["path"][i]}/latents_out.npy'), latents_out[i].cpu().numpy())
                         result[i].save(os.path.join(output_path, f'{name}/6view.png'))
