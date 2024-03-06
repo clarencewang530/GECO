@@ -322,7 +322,7 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
 
     def prepare(self):
         train_sched = DDPMScheduler.from_config(self.scheduler.config)
-        self.scheduler = train_sched
+        # self.scheduler = train_sched
         if isinstance(self.unet, UNet2DConditionModel):
             self.unet = RefOnlyNoisedUNet(self.unet, train_sched, self.scheduler).eval()
 
