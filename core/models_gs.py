@@ -275,8 +275,13 @@ class Zero123PlusGaussian(nn.Module):
         with torch.no_grad():
             text_embeddings_reg, cross_attention_kwargs_reg = self.pipe.prepare_conditions(data['cond'], guidance_scale=4.0)
 
-        pred_latents = predict_x0(self.gen, data['z'], text_embeddings_reg, t=950, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=self.pipe.scheduler, model='zero123plus')
-        zero123out = decode_latents(pred_latents, self.vae, True) # (-1, 1)
+        if self.opt.joint:
+            pred_latents = predict_x0(self.gen, data['z'], text_embeddings_reg, t=950, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=self.pipe.scheduler, model='zero123plus')
+            zero123out = decode_latents(pred_latents, self.vae, True) # (-1, 1)
+        else:
+            with torch.no_grad():
+                pred_latents = predict_x0(self.gen, data['z'], text_embeddings_reg, t=950, guidance_scale=1.0, cross_attention_kwargs=cross_attention_kwargs_reg, scheduler=self.pipe.scheduler, model='zero123plus')
+                zero123out = decode_latents(pred_latents, self.vae, True) # (-1, 1)
         input_image = einops.rearrange((zero123out + 1) / 2, 'b c (h2 h) (w2 w) -> b (h2 w2) c h w', h2=3, w2=2).reshape(-1, 3, 320, 320) # (B*V, 3, H, W)
         input_image = F.interpolate(input_image, size=(self.opt.input_size, self.opt.input_size), mode='bilinear', align_corners=False)
         input_image = TF.normalize(input_image, IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD).reshape(-1, 6, 3, self.opt.input_size, self.opt.input_size) # [B, V, 3, 256, 256]
