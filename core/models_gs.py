@@ -191,8 +191,12 @@ class Zero123PlusGaussian(nn.Module):
         self.gen = self.pipe.unet.eval().requires_grad_(False)
         self.pipe.scheduler = DDPMScheduler.from_config(self.pipe.scheduler.config)
 
-        resume_data = pickle.load(open(self.opt.resume_pkl, 'rb'))
-        copy_params_and_buffers(resume_data['G'], self.gen, require_all=False)
+        if self.opt.resume_pkl is not None:
+            print('loading vsd trained one-step generator')
+            resume_data = pickle.load(open(self.opt.resume_pkl, 'rb'))
+            copy_params_and_buffers(resume_data['G'], self.gen, require_all=False)
+        else:
+            print('unet model from scratch')
         if self.opt.joint:
             self.gen.train().requires_grad_(True)
         else:
